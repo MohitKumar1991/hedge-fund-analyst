@@ -342,38 +342,17 @@ class MergerModel:
 
 # Example usage
 if __name__ == "__main__":
-    # Same inputs as a canonical paper merger model: a 20% premium, 60/40
-    # stock/cash, modest synergies. With no PPA amortization this is a clean
-    # accretion/dilution check.
+    # A canonical paper merger model: 20% premium, 60/40 stock/cash, modest
+    # synergies, no PPA amortization — a clean accretion/dilution check.
+    # (PPA/amortization variants are pinned by tests/test_merger_model.py.)
     model = MergerModel("ABC Corp / XYZ Ltd")
     model.set_acquirer("ABC Corp", share_price=50.0, shares_outstanding=200_000_000,
                        net_income=800_000_000)
     model.set_target("XYZ Ltd", share_price=25.0, shares_outstanding=100_000_000,
                      net_income=200_000_000)
     model.set_deal_terms(
-        offer_price_per_share=30.0,
-        stock_percentage=0.6,
-        cash_percentage=0.4,
-        tax_rate=0.25,
-        synergies_pre_tax=50_000_000,
-        debt_portion_of_cash=0.5,
-        cost_of_new_debt=0.03,
-        foregone_cash_yield=0.02,
-    )
-    print(model.generate_summary())
-
-    print("\n--- Same deal, now with $1.5bn of PPA intangibles over 10y (stock deal) ---")
-    model.set_deal_terms(
-        offer_price_per_share=30.0,
-        stock_percentage=0.6,
-        cash_percentage=0.4,
-        tax_rate=0.25,
-        synergies_pre_tax=50_000_000,
-        debt_portion_of_cash=0.5,
-        cost_of_new_debt=0.03,
-        foregone_cash_yield=0.02,
-        new_intangibles=1_500_000_000,
-        intangible_amortization_years=10,
-        amortization_tax_deductible=False,
+        offer_price_per_share=30.0, stock_percentage=0.6, cash_percentage=0.4,
+        tax_rate=0.25, synergies_pre_tax=50_000_000, debt_portion_of_cash=0.5,
+        cost_of_new_debt=0.03, foregone_cash_yield=0.02,
     )
     print(model.generate_summary())

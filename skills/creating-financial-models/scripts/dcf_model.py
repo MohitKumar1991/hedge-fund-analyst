@@ -502,40 +502,19 @@ def calculate_fcf_cagr(fcf_series: list[float]) -> float:
 
 # Example usage
 if __name__ == "__main__":
-    # Create model
     model = DCFModel("TechCorp")
-
-    # Set historical data
     model.set_historical_financials(
-        revenue=[800, 900, 1000],
-        ebitda=[160, 189, 220],
-        capex=[40, 45, 50],
-        nwc=[80, 90, 100],
-        years=[2022, 2023, 2024],
+        revenue=[800, 900, 1000], ebitda=[160, 189, 220], capex=[40, 45, 50],
+        nwc=[80, 90, 100], years=[2022, 2023, 2024],
     )
-
-    # Set assumptions
     model.set_assumptions(
-        projection_years=5,
-        revenue_growth=[0.15, 0.12, 0.10, 0.08, 0.06],
-        ebitda_margin=[0.23, 0.24, 0.25, 0.25, 0.25],
-        tax_rate=0.25,
-        terminal_growth=0.03,
+        projection_years=5, revenue_growth=[0.15, 0.12, 0.10, 0.08, 0.06],
+        ebitda_margin=[0.23, 0.24, 0.25, 0.25, 0.25], tax_rate=0.25, terminal_growth=0.03,
     )
-
-    # Calculate WACC
     model.calculate_wacc(
         risk_free_rate=0.04, beta=1.2, market_premium=0.07, cost_of_debt=0.05, debt_to_equity=0.5
     )
-
-    # Project cash flows
     model.project_cash_flows()
-
-    # Calculate valuation
     model.calculate_enterprise_value()
-
-    # Calculate equity value
     model.calculate_equity_value(net_debt=200, shares_outstanding=50)
-
-    # Print summary
     print(model.generate_summary())

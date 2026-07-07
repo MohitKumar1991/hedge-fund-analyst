@@ -325,7 +325,7 @@ class SensitivityAnalyzer:
 
 # Example usage
 if __name__ == "__main__":
-    # Mock model for demonstration
+    # Mock model for demonstration: value = revenue * margin * multiple.
     class SimpleModel:
         def __init__(self):
             self.revenue = 1000
@@ -333,48 +333,14 @@ if __name__ == "__main__":
             self.multiple = 10
 
         def calculate_value(self):
-            ebitda = self.revenue * self.margin
-            return ebitda * self.multiple
+            return self.revenue * self.margin * self.multiple
 
-    # Create model and analyzer
     model = SimpleModel()
     analyzer = SensitivityAnalyzer(model)
-
-    # One-way sensitivity
     results = analyzer.one_way_sensitivity(
-        variable_name="Revenue",
-        base_value=model.revenue,
-        range_pct=0.20,
-        steps=5,
+        variable_name="Revenue", base_value=model.revenue, range_pct=0.20, steps=5,
         output_func=model.calculate_value,
         model_update_func=lambda x: setattr(model, "revenue", x),
     )
-
     print("One-Way Sensitivity Analysis:")
     print(results)
-
-    # Tornado analysis
-    variables = {
-        "Revenue": {
-            "base": 1000,
-            "low": 800,
-            "high": 1200,
-            "update_func": lambda x: setattr(model, "revenue", x),
-        },
-        "Margin": {
-            "base": 0.20,
-            "low": 0.15,
-            "high": 0.25,
-            "update_func": lambda x: setattr(model, "margin", x),
-        },
-        "Multiple": {
-            "base": 10,
-            "low": 8,
-            "high": 12,
-            "update_func": lambda x: setattr(model, "multiple", x),
-        },
-    }
-
-    tornado = analyzer.tornado_analysis(variables, model.calculate_value)
-    print("\nTornado Analysis:")
-    print(tornado[["variable", "impact", "impact_pct"]])
