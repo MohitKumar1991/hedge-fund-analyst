@@ -16,6 +16,7 @@ import os
 import pathlib
 import re
 import statistics
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -47,6 +48,8 @@ def _default_ua():
 
 UA = os.environ.get("SEC_EDGAR_UA") or _default_ua()
 
+_HEADERS = {"User-Agent": UA, "Accept-Encoding": "gzip, deflate"}
+
 
 def http_get(url, raw=False, tries=4, sleep=0.25):
     """GET with the required User-Agent, gzip handling, and retry/backoff.
@@ -57,9 +60,7 @@ def http_get(url, raw=False, tries=4, sleep=0.25):
     last = None
     for i in range(tries):
         try:
-            req = urllib.request.Request(
-                url, headers={"User-Agent": UA, "Accept-Encoding": "gzip, deflate"}
-            )
+            req = urllib.request.Request(url, headers=_HEADERS)
             with urllib.request.urlopen(req, timeout=30) as r:
                 data = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
@@ -70,7 +71,7 @@ def http_get(url, raw=False, tries=4, sleep=0.25):
             last = e
             if i < tries - 1:
                 time.sleep(1.5 * (i + 1))
-    print(f"  ! GET failed ({last}): {url}")
+    print(f"  ! GET failed ({last}): {url}", file=sys.stderr)
     return None
 
 

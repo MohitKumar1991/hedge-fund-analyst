@@ -18,7 +18,7 @@ analyst-kit — Analyst Kit skills installer
 Usage:
   analyst-kit <claude-code|codex|openclaw|cowork> [--scope user|project]    # install ALL skills (cowork: print steps)
   analyst-kit setup <claude-code|codex|openclaw|cowork> [--scope user|project]
-  analyst-kit list [--type capability|composite] [--persona <name>]
+  analyst-kit list [--type capability|workflow] [--persona <name>]
   analyst-kit install <skill|persona> --platform <${PLATFORMS.join('|')}> [--scope user|project] [--dry-run] [-y]
   analyst-kit update <skill|persona> --platform <p> [--scope user|project]
   analyst-kit uninstall <skill|persona> --platform <p> [--scope user|project]
@@ -66,7 +66,7 @@ function cmdList(flags) {
   for (const s of filtered.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name))) {
     const req = s.requires.length ? `  ← ${s.requires.join(', ')}` : '';
     const env = s.env.length ? `  [keys: ${s.env.join(', ')}]` : '';
-    console.log(`    ${s.type === 'composite' ? '◆' : '○'} ${s.name.padEnd(26)} ${s.type}${req}${env}`);
+    console.log(`    ${s.type === 'workflow' ? '◆' : '○'} ${s.name.padEnd(26)} ${s.type}${req}${env}`);
   }
   const personas = listPersonas();
   if (personas.length) {

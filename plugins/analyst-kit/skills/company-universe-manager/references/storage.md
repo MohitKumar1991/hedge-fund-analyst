@@ -78,7 +78,6 @@ shared, human-viewable mirror.
 
 ## Optional git versioning
 
-`scripts/git_sync.py` can version the **store root** if you want history /
-backup (it is no longer tied to any specific GitHub repo): run `git init` in the
-store root, then `git_sync.py commit <root> <file> "<msg>"`. This is independent
+The store root is a plain folder — if you want history / backup, run `git init`
+in it and commit after changes with ordinary git commands. This is independent
 of the `remote` backend above.
