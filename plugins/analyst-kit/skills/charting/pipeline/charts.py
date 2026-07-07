@@ -27,11 +27,38 @@ def _symbol(records: list[dict]) -> str:
     return records[0].get("symbol", "") if records else ""
 
 
+_ROLES = ("primary", "secondary", "neutral", "estimate")
+
+
+def _role(i: int) -> str:
+    """Role for the i-th series of a multi-company/multi-metric chart."""
+    return _ROLES[i % len(_ROLES)]
+
+
+def _fy_frame(records: list[dict], n: int):
+    """Lookback-windowed frame plus its FY-labelled periods."""
+    df = process.lookback(process.frame(records), n)
+    return df, [f"FY{y}" for y in df["fiscalYear"].to_list()]
+
+
+def _earnings_window(earnings_records: list[dict], metric: str, n: int):
+    """Reported earnings rows (oldest→newest, last n) and their quarter labels."""
+    rows = sorted([e for e in earnings_records if e.get(f"{metric}Actual") is not None],
+                  key=lambda x: x["date"])
+    if n:
+        rows = rows[-n:]
+    return rows, [process.quarter_label(e["date"]) for e in rows]
+
+
+def _ohlc(rows: list[dict]) -> list[list]:
+    return [[process.to_millis(r["date"]), r["open"], r["high"], r["low"], r["close"]]
+            for r in rows]
+
+
 # --- 1. revenue + net income + margin (dual axis) ------------------------
 
 def revenue_margins(income_records, *, n=5, currency="$") -> dict:
-    df = process.lookback(process.frame(income_records), n)
-    periods = [f"FY{y}" for y in df["fiscalYear"].to_list()]
+    df, periods = _fy_frame(income_records, n)
     rev, ni = df["revenue"].to_list(), df["netIncome"].to_list()
     divisor, suffix = process.pick_scale(rev + ni)
     marg = [None if m is None else round(m, 2)
@@ -89,8 +116,7 @@ def _line(periods, series_defs, *, percent, currency, title, subtitle, value_lab
 
 
 def revenue_trend(income_records, *, n=8, currency="$", flags=None) -> dict:
-    df = process.lookback(process.frame(income_records), n)
-    periods = [f"FY{y}" for y in df["fiscalYear"].to_list()]
+    df, periods = _fy_frame(income_records, n)
     sym = _symbol(income_records)
     return _line(periods, [{"name": "Revenue", "values": df["revenue"].to_list(), "role": "primary"}],
                  percent=False, currency=currency, title=f"{sym} — revenue",
@@ -99,8 +125,7 @@ def revenue_trend(income_records, *, n=8, currency="$", flags=None) -> dict:
 
 
 def revenue_yoy(income_records, *, n=12, lag=1, currency="$", flags=None) -> dict:
-    df = process.lookback(process.frame(income_records), n)
-    periods = [f"FY{y}" for y in df["fiscalYear"].to_list()]
+    df, periods = _fy_frame(income_records, n)
     growth = process.yoy(df["revenue"].to_list(), lag=lag)
     sym = _symbol(income_records)
     return _line(periods, [{"name": "Revenue", "values": growth, "role": "primary"}],
@@ -128,9 +153,8 @@ def metrics_yoy(records, *, metrics: Sequence[str], lag=4, title=None, currency=
                       if any(growths[m][i] is not None for m in metrics)), len(dates))
     periods = [process.quarter_label(d) if lag == 4 else f"FY{str(d)[:4]}"
                for d in dates[start:]]
-    roles = ["primary", "secondary", "neutral", "estimate"]
     series_defs = [{"name": m.replace("_", " ").capitalize() + " YoY",
-                    "values": growths[m][start:], "role": roles[i % len(roles)]}
+                    "values": growths[m][start:], "role": _role(i)}
                    for i, m in enumerate(metrics)]
     sym = _symbol(records)
     return _line(periods, series_defs, percent=True, currency=currency,
@@ -142,14 +166,13 @@ def metrics_yoy(records, *, metrics: Sequence[str], lag=4, title=None, currency=
 
 def compare_rebased(named_income: Sequence[tuple[str, list[dict]]], *, n=5) -> dict:
     """Multiple companies' revenue rebased to 100 — relative growth, not size."""
-    roles = ["primary", "secondary", "neutral", "estimate"]
     series_defs, periods = [], None
     for i, (sym, records) in enumerate(named_income):
-        df = process.lookback(process.frame(records), n)
+        df, fy = _fy_frame(records, n)
         if periods is None:
-            periods = [f"FY{y}" for y in df["fiscalYear"].to_list()]
+            periods = fy
         series_defs.append({"name": sym, "values": process.rebase(df["revenue"].to_list()),
-                            "role": roles[i % len(roles)]})
+                            "role": _role(i)})
     out = _line(periods, series_defs, percent=True, currency="",
                 title="Revenue rebased to 100", subtitle=f"{periods[0]}–{periods[-1]}",
                 value_label="Indexed (base 100)", meta={"chart": "compareRebased"})
@@ -165,14 +188,13 @@ def compare_price_rebased(named_price: Sequence[tuple[str, list[dict]]]) -> dict
     unreadable): each series is rebased to 100 at the window start, so the chart
     shows relative performance regardless of absolute share price.
     """
-    roles = ["primary", "secondary", "neutral", "estimate"]
     series = []
     start = end = None
     for i, (sym, recs) in enumerate(named_price):
         rows = sorted(recs, key=lambda r: r["date"])
         idx = process.rebase([r["close"] for r in rows], 100)
         series.append({
-            "name": sym, "kind": "line", "yAxis": "idx", "role": roles[i % len(roles)],
+            "name": sym, "kind": "line", "yAxis": "idx", "role": _role(i),
             "data": [[process.to_millis(r["date"]), v] for r, v in zip(rows, idx)],
         })
         start = rows[0]["date"] if start is None else min(start, rows[0]["date"])
@@ -263,11 +285,7 @@ def dividend_yield(div_records, *, n_years=5, currency="$") -> dict:
 # --- 6. earnings surprise over time --------------------------------------
 
 def surprise(earnings_records, *, n=8, metric="eps") -> dict:
-    rows = sorted([e for e in earnings_records if e.get(f"{metric}Actual") is not None],
-                  key=lambda x: x["date"])
-    if n:
-        rows = rows[-n:]
-    periods = [process.quarter_label(e["date"]) for e in rows]
+    rows, periods = _earnings_window(earnings_records, metric, n)
     data = []
     for e in rows:
         a, est = e[f"{metric}Actual"], e[f"{metric}Estimated"]
@@ -289,11 +307,7 @@ def surprise(earnings_records, *, n=8, metric="eps") -> dict:
 # --- 7. estimate vs reported ---------------------------------------------
 
 def estimate_vs_reported(earnings_records, *, n=8, metric="revenue", currency="$") -> dict:
-    rows = sorted([e for e in earnings_records if e.get(f"{metric}Actual") is not None],
-                  key=lambda x: x["date"])
-    if n:
-        rows = rows[-n:]
-    periods = [process.quarter_label(e["date"]) for e in rows]
+    rows, periods = _earnings_window(earnings_records, metric, n)
     est = [e[f"{metric}Estimated"] for e in rows]
     rep = [e[f"{metric}Actual"] for e in rows]
     divisor, suffix = process.pick_scale(est + rep)
@@ -322,10 +336,8 @@ def price(price_records, *, primary=True, currency="$", flags=None) -> dict:
     rows = sorted(price_records, key=lambda x: x["date"])
     sym = _symbol(price_records)
     if primary:
-        data = [[process.to_millis(r["date"]), r["open"], r["high"], r["low"], r["close"]]
-                for r in rows]
         series = [{"name": "Price", "kind": "candlestick", "yAxis": "price",
-                   "role": "primary", "data": data}]
+                   "role": "primary", "data": _ohlc(rows)}]
     else:
         data = [[process.to_millis(r["date"]), r["close"]] for r in rows]
         series = [{"name": "Price", "kind": "line", "yAxis": "price",
@@ -362,8 +374,7 @@ def price_with_revenue(price_records, income_records, *, mode="period",
     """
     prows = sorted(price_records, key=lambda r: r["date"])
     pmin, pmax = prows[0]["date"], prows[-1]["date"]
-    candle = [[process.to_millis(r["date"]), r["open"], r["high"], r["low"], r["close"]]
-              for r in prows]
+    candle = _ohlc(prows)
     qall = sorted(income_records, key=lambda r: r["date"])
     sym = _symbol(price_records) or _symbol(income_records)
     price_axis = {"id": "price", "name": "Price", "currency": currency,
