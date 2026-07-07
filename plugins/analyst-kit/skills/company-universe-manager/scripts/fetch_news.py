@@ -23,21 +23,13 @@ import os
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from fmp_common import FMP_BASE, http_json
 from monitor_dates import active_tickers
 from storage import load_store
-
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
-
-
-def _http_json(url: str, timeout: int = 20) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "company-universe-manager"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted FMP host)
-        return json.loads(resp.read().decode("utf-8"))
 
 
 def fetch_fmp_news(
@@ -46,7 +38,7 @@ def fetch_fmp_news(
     *,
     limit: int = 50,
     from_date: str | None = None,
-    http: Callable[[str], Any] = _http_json,
+    http: Callable[[str], Any] = http_json,
 ) -> dict[str, list[dict[str, Any]]]:
     """Per-ticker recent news from FMP's stock_news endpoint.
 

@@ -28,18 +28,16 @@ Pure standard library.
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import sys
-import urllib.request
 from datetime import date
 from typing import Any, Callable
 
+from csv_manager import read_csv
 from events_manager import normalize_event
+from fmp_common import FMP_BASE, http_json
 from storage import load_store
-
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
 
 # --- slot identity & diff (pure) --------------------------------------------
@@ -224,33 +222,23 @@ def monitor(
 
 def active_tickers(store) -> list[str]:
     """Active tickers from the roster CSV (active != 'false')."""
-    path = store.universe_csv_path()
-    if not path.exists():
-        return []
     out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if (row.get("active", "true") or "true").lower() != "false":
-                t = (row.get("ticker_symbol") or "").strip().upper()
-                if t:
-                    out.append(t)
+    for row in read_csv(store.universe_csv_path()):
+        if (row.get("active", "true") or "true").lower() != "false":
+            t = (row.get("ticker_symbol") or "").strip().upper()
+            if t:
+                out.append(t)
     return out
 
 
 # --- real fetch layer (HTTP) -------------------------------------------------
 
 
-def _http_json(url: str, timeout: int = 20) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "company-universe-manager"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted FMP host)
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def fetch_fmp_earnings(
     ticker: str,
     api_key: str,
     today: str | None = None,
-    http: Callable[[str], Any] = _http_json,
+    http: Callable[[str], Any] = http_json,
 ) -> list[dict[str, Any]]:
     """Upcoming earnings dates for a ticker from FMP's historical earning calendar.
 
