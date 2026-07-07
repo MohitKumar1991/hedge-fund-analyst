@@ -323,42 +323,6 @@ class SensitivityAnalyzer:
         return (low + high) / 2
 
 
-def create_data_table(
-    row_variable: tuple[str, list[float], Callable],
-    col_variable: tuple[str, list[float], Callable],
-    output_func: Callable,
-) -> pd.DataFrame:
-    """
-    Create Excel-style data table for two variables.
-
-    Args:
-        row_variable: (name, values, update_function)
-        col_variable: (name, values, update_function)
-        output_func: Function to calculate output
-
-    Returns:
-        DataFrame formatted as data table
-    """
-    row_name, row_values, row_update = row_variable
-    col_name, col_values, col_update = col_variable
-
-    results = np.zeros((len(row_values), len(col_values)))
-
-    for i, row_val in enumerate(row_values):
-        for j, col_val in enumerate(col_values):
-            row_update(row_val)
-            col_update(col_val)
-            results[i, j] = output_func()
-
-    df = pd.DataFrame(
-        results,
-        index=pd.Index(row_values, name=row_name),
-        columns=pd.Index(col_values, name=col_name),
-    )
-
-    return df
-
-
 # Example usage
 if __name__ == "__main__":
     # Mock model for demonstration

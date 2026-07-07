@@ -194,7 +194,7 @@ the scripts themselves do not produce them.
 - `scripts/merger_model.py`: M&A accretion/dilution engine (`MergerModel`
   class) — pure standard library, no third-party dependencies
 - `scripts/sensitivity_analysis.py`: Sensitivity testing framework
-  (`SensitivityAnalyzer` class, `create_data_table` helper)
+  (`SensitivityAnalyzer` class)
 
 `dcf_model.py` requires **numpy**; `sensitivity_analysis.py` also requires
 **pandas** (`pip install numpy pandas` or run with `uv run --with
