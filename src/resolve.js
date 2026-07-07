@@ -31,31 +31,58 @@ export function resolveClosure(rootNames, skills = getSkills()) {
   return ordered;
 }
 
-// Personas are defined by the plugin manifests under plugins/ (single source of
-// truth). A self-contained plugin (the marketplace layout) carries its skills as
-// folders under <plugin>/skills/ rather than a manifest `skills` array, so read
-// the bundle directory when no explicit list is present.
-export function listPersonas() {
+// One walk of plugins/, shared by the CLI (personas) and the validator: each
+// plugin's manifest state plus both places its skills can be declared — a
+// manifest `skills` array (legacy) or folders bundled under <plugin>/skills/
+// (the self-contained marketplace layout).
+export function scanPlugins() {
   if (!existsSync(PLUGINS_DIR)) return [];
   const out = [];
   for (const entry of readdirSync(PLUGINS_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const dir = join(PLUGINS_DIR, entry.name);
-    const manifest = join(dir, '.claude-plugin', 'plugin.json');
-    if (!existsSync(manifest)) continue;
-    let data;
-    try { data = JSON.parse(readFileSync(manifest, 'utf8')); } catch { continue; }
-
-    let skills = (data.skills || []).map((p) => basename(p));
-    if (!skills.length) {
-      const bundle = join(dir, 'skills');
-      if (existsSync(bundle)) {
-        skills = readdirSync(bundle, { withFileTypes: true })
-          .filter((e) => e.isDirectory())
-          .map((e) => e.name);
-      }
+    const manifestPath = join(dir, '.claude-plugin', 'plugin.json');
+    let manifest = null;
+    let manifestError = null;
+    if (!existsSync(manifestPath)) {
+      manifestError = 'missing .claude-plugin/plugin.json';
+    } else {
+      try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+      catch (e) { manifestError = `invalid JSON: ${e.message}`; }
     }
-    out.push({ name: data.name || entry.name, description: data.description || '', skills });
+    const bundleDir = join(dir, 'skills');
+    const bundledSkills = existsSync(bundleDir)
+      ? readdirSync(bundleDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+      : [];
+    out.push({
+      folder: entry.name,
+      dir,
+      manifest,
+      manifestError,
+      manifestSkillPaths: (manifest && manifest.skills) || [],
+      bundledSkills,
+    });
+  }
+  return out;
+}
+
+// Personas are defined by the plugin manifests under plugins/ (single source of
+// truth). A self-contained plugin carries its skills as bundled folders rather
+// than a manifest `skills` array, so fall back to the bundle when no explicit
+// list is present.
+export function listPersonas() {
+  const out = [];
+  for (const p of scanPlugins()) {
+    if (!p.manifest) continue;
+    let skills = p.manifestSkillPaths.map((x) => basename(x));
+    if (!skills.length) skills = p.bundledSkills;
+    out.push({
+      name: p.manifest.name || p.folder,
+      description: p.manifest.description || '',
+      skills,
+    });
   }
   return out;
 }
