@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="luxury">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analyst Kit — How Analytics Work</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, h5, h6, li, dd, blockquote, figcaption, td, th, .label) {
+    overflow-wrap: anywhere;
+  }
+  .badge { white-space: nowrap; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .mermaid-wrap { background: var(--color-base-200); border-radius: var(--radius-box, 1rem); padding: 1.25rem; overflow-x: auto; }
+  code.inline { background: var(--color-base-200); padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-size: 0.85em; }
+</style>
+</head>
+<body class="bg-base-100 text-base-content">
+<main class="mx-auto max-w-6xl p-6 lg:p-10 space-y-12">
+
+  <!-- ============ HEADER ============ -->
+  <header class="space-y-4">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-4xl font-bold">How Analyst Kit analytics work</h1>
+      <span class="badge badge-primary badge-lg">skills/analyst-kit-core</span>
+    </div>
+    <p class="max-w-3xl text-base-content/80 text-lg">
+      Every Analyst Kit skill run is logged twice: a <strong>local leg</strong> that always writes
+      JSONL to the user's own machine, and a <strong>remote leg</strong> that sends one small,
+      consent-gated event to PostHog. Everything lives in a single ~100-line bash script,
+      <code class="inline">skills/analyst-kit-core/bin/analyst-kit-log</code> — there is no SDK,
+      no batching, and exactly <strong>one remote event type</strong>: <code class="inline">skill_run</code>.
+    </p>
+  </header>
+
+  <!-- ============ TLDR STATS ============ -->
+  <section class="stats stats-vertical lg:stats-horizontal shadow w-full">
+    <div class="stat">
+      <div class="stat-title">Remote event types</div>
+      <div class="stat-value text-primary">1</div>
+      <div class="stat-desc"><code class="inline">skill_run</code> — nothing else</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">PostHog API used</div>
+      <div class="stat-value text-2xl">POST /capture/</div>
+      <div class="stat-desc">public single-event Capture API, raw curl</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Default host</div>
+      <div class="stat-value text-2xl">us.i.posthog.com</div>
+      <div class="stat-desc">US ingest endpoint (overridable)</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Consent tiers</div>
+      <div class="stat-value text-primary">3</div>
+      <div class="stat-desc">community (default) · anonymous · off</div>
+    </div>
+  </section>
+
+  <!-- ============ FLOW DIAGRAM ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">When does an event fire?</h2>
+    <p class="max-w-3xl text-base-content/80">
+      Every shipped <code class="inline">SKILL.md</code> carries generated Preamble / Completion
+      blocks. The agent runs the Preamble at skill start (which logs <code class="inline">start</code>
+      locally) and the Completion block at the end (which logs <code class="inline">end</code> locally
+      <em>and</em> fires the PostHog event). Note the asymmetry:
+      <strong>PostHog only ever sees <code class="inline">end</code> and <code class="inline">CRASH</code> events — never <code class="inline">start</code>.</strong>
+    </p>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">
+flowchart TD
+  A["Agent invokes any Analyst Kit skill"] --> B["Preamble block in SKILL.md<br/>runs bin/analyst-kit-preamble --skill X"]
+  B --> S["analyst-kit-log start"]
+  S --> L1[("~/.analyst-kit/analytics/skill-usage.jsonl<br/>start event — LOCAL, always written")]
+  S --> P["writes .pending-&lt;session&gt;-&lt;skill&gt; marker"]
+  S --> CR{"stale .pending-* left by<br/>another session?"}
+  CR -- "yes (that run died)" --> CRASH["synthesize end event<br/>outcome = CRASH"]
+  CRASH --> L1
+  CRASH --> GATE
+  B --> W["… skill does its actual work …"]
+  W --> E["Completion block runs<br/>analyst-kit-log end --skill X --outcome DONE"]
+  E --> L2[("skill-usage.jsonl<br/>end event + duration — LOCAL, always")]
+  E --> GATE{"telemetry tier?<br/>(analyst-kit-config get telemetry)"}
+  GATE -- "off" --> STOP["nothing leaves the machine"]
+  GATE -- "community / anonymous" --> CURL["curl -sf --max-time 3 … &amp;<br/>backgrounded, fire-and-forget"]
+  CURL --> PH["PostHog  POST https://us.i.posthog.com/capture/<br/>event: skill_run"]
+  style PH fill:#4c3a99,stroke:#8b7ad9,color:#fff
+  style STOP fill:#2d4a2d,stroke:#5a9a5a,color:#fff
+  style L1 fill:#3a3a4c,stroke:#777,color:#eee
+  style L2 fill:#3a3a4c,stroke:#777,color:#eee
+      </pre>
+    </div>
+    <div role="alert" class="alert">
+      <span>
+        The plugin's <code class="inline">SessionStart</code> hook (<code class="inline">analyst-kit-session-hook</code>)
+        sends <strong>no analytics at all</strong> — it only surfaces onboarding/telemetry state into the
+        session context and bridges API keys. Its single network call is the daily update check, which
+        fetches the <code class="inline">VERSION</code> file from GitHub raw — not PostHog, not telemetry.
+      </span>
+    </div>
+  </section>
+
+  <!-- ============ TWO LEGS COMPARISON ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">What gets recorded — local vs remote</h2>
+    <p class="max-w-3xl text-base-content/80">
+      The two legs deliberately carry different fields. The local log keeps a sanitized repo slug and
+      session id for the user's own crash detection and usage review; the remote event strips both.
+    </p>
+    <div class="grid gap-6 lg:grid-cols-2">
+      <!-- LOCAL -->
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title">
+            Local leg <span class="badge badge-success badge-soft">always on</span>
+          </h3>
+          <p class="text-sm text-base-content/70">
+            Appends to <code class="inline">~/.analyst-kit/analytics/skill-usage.jsonl</code>.
+            Not consent-gated — it never leaves the machine. Powers crash detection and
+            "show my analyst-kit usage".
+          </p>
+          <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+            <table class="table table-sm table-zebra">
+              <thead><tr><th>Field</th><th>Content</th></tr></thead>
+              <tbody>
+                <tr><td><code class="inline">event</code></td><td>start | end</td></tr>
+                <tr><td><code class="inline">skill</code></td><td>skill name</td></tr>
+                <tr><td><code class="inline">ts</code></td><td>UTC ISO-8601</td></tr>
+                <tr><td><code class="inline">version</code></td><td>analyst-kit-core VERSION</td></tr>
+                <tr><td><code class="inline">repo</code></td><td>sanitized git-repo basename — <strong>local only, never uploaded</strong></td></tr>
+                <tr><td><code class="inline">session</code></td><td>agent PPID — <strong>local only</strong></td></tr>
+                <tr><td><code class="inline">outcome</code></td><td>end events: DONE · DONE_WITH_CONCERNS · ERROR · ABORT · NEEDS_CONTEXT · CRASH</td></tr>
+                <tr><td><code class="inline">duration_s</code></td><td>end minus start (from the .pending marker)</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="local-jsonl"></div>
+        </div>
+      </div>
+      <!-- REMOTE -->
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title">
+            Remote leg (PostHog) <span class="badge badge-warning badge-soft">consent-gated</span>
+          </h3>
+          <p class="text-sm text-base-content/70">
+            One <code class="inline">skill_run</code> event per skill completion (or crash
+            finalization). Fired only when <code class="inline">telemetry ≠ off</code>.
+          </p>
+          <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+            <table class="table table-sm table-zebra">
+              <thead><tr><th>Field</th><th>Content</th></tr></thead>
+              <tbody>
+                <tr><td><code class="inline">event</code></td><td>always <code class="inline">skill_run</code></td></tr>
+                <tr><td><code class="inline">distinct_id</code></td><td>random per-machine UUID (community) or literal <code class="inline">"anon"</code> (anonymous)</td></tr>
+                <tr><td><code class="inline">timestamp</code></td><td>UTC ISO-8601</td></tr>
+                <tr><td><code class="inline">properties.skill</code></td><td>skill name</td></tr>
+                <tr><td><code class="inline">properties.version</code></td><td>kit version</td></tr>
+                <tr><td><code class="inline">properties.outcome</code></td><td>DONE / ERROR / CRASH / …</td></tr>
+                <tr><td><code class="inline">properties.duration_s</code></td><td>run duration in seconds</td></tr>
+                <tr><td><code class="inline">properties.platform</code></td><td>claude-plugin | claude-code | codex — inferred from install path</td></tr>
+                <tr><td><code class="inline">properties.tier</code></td><td>community | anonymous</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div role="alert" class="alert alert-success alert-soft">
+            <span><strong>Never sent remotely:</strong> repo names, file paths, tickers, file content, API keys, session ids, usernames, hostnames.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ POSTHOG API DETAIL ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">The PostHog API being used</h2>
+    <div class="grid gap-6 lg:grid-cols-2">
+      <div class="space-y-4">
+        <div class="card card-border bg-base-100">
+          <div class="card-body space-y-2">
+            <h3 class="card-title text-lg">Endpoint &amp; mechanics</h3>
+            <ul class="list-disc list-inside space-y-2 text-sm text-base-content/80">
+              <li><strong>API:</strong> PostHog's public <em>single-event Capture API</em> —
+                <code class="inline">POST {host}/capture/</code> with a JSON body. No SDK
+                (<code class="inline">posthog-node</code>/<code class="inline">posthog-js</code> are not used),
+                no <code class="inline">/batch/</code> endpoint, no person-profile
+                <code class="inline">$set</code> properties — just one raw event per call.</li>
+              <li><strong>Auth:</strong> the project API key travels <em>in the JSON body</em>
+                (<code class="inline">api_key</code> field), as the Capture API expects. It's a
+                <code class="inline">phc_…</code> <em>public write-only ingest key</em> — it can only create
+                events, never read them — which is why a default is safely hardcoded in the script.</li>
+              <li><strong>Transport:</strong> <code class="inline">curl -sf --max-time 3 … &amp;</code> —
+                backgrounded, output discarded, hard 3-second cap. A failed send is silently dropped;
+                telemetry can never block or fail a skill (the script's contract is "never exits non-zero").</li>
+              <li><strong>Identity:</strong> in <code class="inline">community</code> tier a UUID is lazily
+                generated into <code class="inline">~/.analyst-kit/device-id</code>
+                (<code class="inline">uuidgen</code>, falling back to <code class="inline">/dev/urandom</code>) so
+                usage counts deduplicate per machine. In <code class="inline">anonymous</code> tier every event
+                uses <code class="inline">distinct_id: "anon"</code>, so all anonymous users collapse into one
+                PostHog person.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+          <table class="table table-sm">
+            <thead><tr><th>Knob</th><th>Override</th><th>Default</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Ingest key</td>
+                <td><code class="inline">AK_POSTHOG_KEY</code> env, or <code class="inline">analyst-kit-config set posthog_key …</code></td>
+                <td>hardcoded <code class="inline">phc_SjGb…S8VD</code></td>
+              </tr>
+              <tr>
+                <td>Host</td>
+                <td><code class="inline">AK_POSTHOG_HOST</code> env, or <code class="inline">posthog_host</code> config</td>
+                <td><code class="inline">https://us.i.posthog.com</code></td>
+              </tr>
+              <tr>
+                <td>Consent</td>
+                <td><code class="inline">analyst-kit-config set telemetry community|anonymous|off</code></td>
+                <td><code class="inline">community</code> (on, with device id)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="space-y-2">
+        <p class="text-sm text-base-content/70">Exact wire payload (values illustrative):</p>
+        <div id="payload-json"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONSENT TIERS ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Consent tiers</h2>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-zebra">
+        <thead>
+          <tr><th>Tier</th><th>Local JSONL</th><th>PostHog event</th><th>distinct_id</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="badge badge-primary">community</span> <span class="badge badge-ghost badge-sm">default</span></td>
+            <td>✅ written</td>
+            <td>✅ sent</td>
+            <td>stable random per-machine UUID (<code class="inline">~/.analyst-kit/device-id</code>)</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-secondary">anonymous</span></td>
+            <td>✅ written</td>
+            <td>✅ sent</td>
+            <td>literal <code class="inline">"anon"</code> — no identifier of any kind</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-neutral">off</span></td>
+            <td>✅ written (user's own machine)</td>
+            <td>🚫 nothing leaves the machine</td>
+            <td>—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-sm text-base-content/70 max-w-3xl">
+      Telemetry is <strong>on by default with explicit opt-out</strong>. The onboarding flow gives a
+      one-time notice (tracked by <code class="inline">.onboarded</code> /
+      <code class="inline">.telemetry-prompted</code> markers); when a user asks to opt out, the agent is
+      instructed to make the case once, offer <code class="inline">anonymous</code> as middle ground, then
+      flip it immediately if they still want out.
+    </p>
+  </section>
+
+  <!-- ============ IDENTITY ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">User identity — two persistent ids, two audiences</h2>
+    <p class="max-w-3xl text-base-content/80">
+      There is no account, login, or profile. Two independent machine-local ids exist, they are
+      generated differently, sent to different parties, and <strong>never appear together in the
+      same request</strong>: PostHog never sees <code class="inline">user-id</code>; SEC EDGAR never
+      sees <code class="inline">device-id</code>.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-zebra">
+        <thead>
+          <tr><th class="w-36"></th><th><code class="inline">device-id</code> (analytics)</th><th><code class="inline">user-id</code> (SEC EDGAR)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="font-semibold">File</td>
+            <td><code class="inline">~/.analyst-kit/device-id</code></td>
+            <td><code class="inline">~/.analyst-kit/user-id</code></td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Value</td>
+            <td>random UUID via <code class="inline">uuidgen</code>, falling back to 16 random bytes hex from <code class="inline">/dev/urandom</code></td>
+            <td>Unix timestamp of the first run (<code class="inline">date +%s</code>, e.g. <code class="inline">1751871242</code>)</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Created by</td>
+            <td><code class="inline">analyst-kit-log</code>'s <code class="inline">posthog()</code>, lazily — only when a remote event is about to be sent <em>and</em> tier is <code class="inline">community</code> (<code class="inline">analyst-kit-log:57-62</code>)</td>
+            <td><code class="inline">analyst-kit-setup ensure-identity</code>, run on <em>every</em> session start (plugin hook) and every skill preamble; idempotent (<code class="inline">analyst-kit-setup:231-244</code>)</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Sent to</td>
+            <td>PostHog, as the event's <code class="inline">distinct_id</code></td>
+            <td>SEC EDGAR only, embedded in the HTTP <code class="inline">User-Agent</code> header: <code class="inline">analyst-kit akit&lt;timestamp&gt;@gmail.com</code></td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Purpose</td>
+            <td>deduplicate usage counts per machine in PostHog</td>
+            <td>give each install its own contact UA — SEC's fair-access policy throttles per UA, so shared UAs across all installs would rate-limit everyone collectively</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Tier-dependent?</td>
+            <td>yes — <code class="inline">anonymous</code> tier ignores it (sends <code class="inline">"anon"</code>); <code class="inline">off</code> sends nothing</td>
+            <td>no — exists regardless of telemetry setting; it is not telemetry</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Reset</td>
+            <td>delete the file → a fresh UUID is generated on the next community-tier event</td>
+            <td>delete the file <em>and</em> the mirrored <code class="inline">SEC_EDGAR_UA=</code> line in <code class="inline">~/.analyst-kit/.env</code>; or export your own <code class="inline">SEC_EDGAR_UA</code>, which always wins</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="grid gap-3 lg:grid-cols-2">
+      <div role="alert" class="alert alert-info alert-soft">
+        <span><strong>How the SEC UA is derived:</strong> <code class="inline">ensure-identity</code> writes the
+        timestamp to <code class="inline">user-id</code> and mirrors
+        <code class="inline">SEC_EDGAR_UA="analyst-kit akit&lt;id&gt;@gmail.com"</code> into
+        <code class="inline">~/.analyst-kit/.env</code>. Each SEC skill's vendored
+        <code class="inline">edgar.py</code> independently re-derives the same UA from
+        <code class="inline">user-id</code> (<code class="inline">_default_ua()</code>), honoring an explicit
+        <code class="inline">SEC_EDGAR_UA</code> env var first and falling back to a generic shared UA if no id
+        exists yet. The <code class="inline">akit…@gmail.com</code> address is synthetic — SEC asks for a
+        contact string but does not verify it.</span>
+      </div>
+      <div role="alert" class="alert alert-info alert-soft">
+        <span><strong>Privacy shape:</strong> neither id is derived from the user — no hostname, username,
+        hardware serial, MAC address, or email is read. <code class="inline">device-id</code> is pure
+        randomness; <code class="inline">user-id</code> reveals only <em>when</em> the kit was first run
+        (second-level resolution), which also means two installs in the same second would share a UA.
+        Both live in plain text under <code class="inline">~/.analyst-kit/</code> and are user-inspectable.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CRASH DETECTION ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Crash detection — the clever bit</h2>
+    <p class="max-w-3xl text-base-content/80">
+      <code class="inline">log start</code> drops a <code class="inline">.pending-&lt;session&gt;-&lt;skill&gt;</code>
+      marker; <code class="inline">log end</code> consumes it (and derives
+      <code class="inline">duration_s</code> from its timestamp). If a skill run dies before its Completion
+      block — agent crash, killed session — the marker is orphaned. The <em>next</em>
+      <code class="inline">log start</code> in <em>any other session</em> sweeps stale markers, finalizes each
+      as an <code class="inline">end</code> event with <code class="inline">outcome: "CRASH"</code>, and fires
+      that to PostHog too. So crash telemetry arrives late, attributed to the crashed skill, with
+      <code class="inline">duration_s: 0</code> and <code class="inline">session: "stale"</code> locally.
+    </p>
+  </section>
+
+  <!-- ============ THE CODE ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">The code that does it</h2>
+    <p class="text-sm text-base-content/70">
+      <code class="inline">skills/analyst-kit-core/bin/analyst-kit-log</code>, lines 49–66 — the entire
+      remote leg:
+    </p>
+    <div id="posthog-fn"></div>
+    <p class="text-sm text-base-content/70">
+      Call sites: <code class="inline">bin/analyst-kit-preamble:84</code> runs
+      <code class="inline">log start</code>; the generated Completion block in every SKILL.md
+      (<code class="inline">templates/epilogue.md.tmpl:19</code>) runs <code class="inline">log end</code>.
+    </p>
+  </section>
+
+  <!-- ============ FINDINGS ============ -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Things worth knowing (and one doc bug)</h2>
+    <div class="space-y-3">
+      <div role="alert" class="alert alert-warning">
+        <div>
+          <h3 class="font-bold">Docs contradict the code on the default tier</h3>
+          <div class="text-sm">
+            <code class="inline">skills/analyst-kit-core/SKILL.md:48</code> says
+            "Defaults: <code class="inline">telemetry=off</code>", but
+            <code class="inline">bin/analyst-kit-config:13</code> defaults to
+            <code class="inline">community</code> (on) — and SKILL.md's own "Telemetry tiers" section
+            (line 97) agrees with the code. Line 48 looks stale and should read
+            <code class="inline">telemetry=community</code>.
+          </div>
+        </div>
+      </div>
+      <div role="alert" class="alert alert-info alert-soft">
+        <span><strong>PostHog never sees <code class="inline">start</code> events.</strong> Remote analytics
+        are completion-only, so "skills started but never finished (without crashing a marker sweep)"
+        is invisible remotely — a deliberate minimal-data choice.</span>
+      </div>
+      <div role="alert" class="alert alert-info alert-soft">
+        <span><strong>The tier itself is sent as a property</strong> (<code class="inline">properties.tier</code>),
+        so the maintainers can segment community vs anonymous volume in PostHog.</span>
+      </div>
+      <div role="alert" class="alert alert-info alert-soft">
+        <span><strong>Robustness contract:</strong> no <code class="inline">set -e</code>, every write is
+        <code class="inline">|| true</code>, the script always exits 0, and the curl is backgrounded with a
+        3s cap — a total telemetry failure can never break a skill run.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ============ PROPOSAL: AI OBSERVABILITY ==================== -->
+  <!-- ============================================================ -->
+  <div class="flex items-center gap-4 pt-2">
+    <div class="h-px flex-1 bg-primary/40"></div>
+    <span class="text-lg font-bold text-primary text-center">PROPOSAL — deeper AI observability</span>
+    <div class="h-px flex-1 bg-primary/40"></div>
+  </div>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Goal: answer three questions today's telemetry can't</h2>
+    <p class="max-w-3xl text-base-content/80">
+      Today's remote telemetry is one <code class="inline">skill_run</code> event per completion.
+      PostHog's <strong>AI observability</strong> product (docs:
+      <code class="inline">posthog.com/docs/ai-observability</code>) adds a purpose-built event model
+      with an LLM analytics dashboard, trace viewer, and automatic cost computation. Here's the gap:
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-zebra">
+        <thead><tr><th>Question</th><th>Today (<code class="inline">skill_run</code>)</th><th>With AI observability</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="font-semibold">1 · What prompts are used?</td>
+            <td><span class="badge badge-error badge-soft">nothing</span> — no content ever leaves the machine (by design)</td>
+            <td><code class="inline">$ai_generation</code> carries <code class="inline">$ai_input</code> (message list) and <code class="inline">$ai_output_choices</code>; <code class="inline">$ai_trace</code> shows the whole conversation in PostHog's trace viewer</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">2 · What skills &amp; data are invoked?</td>
+            <td><span class="badge badge-warning badge-soft">partial</span> — skill name, outcome, duration; no data sources, and events from one session can't be joined together</td>
+            <td>each skill run becomes an <code class="inline">$ai_span</code> inside a session trace (<code class="inline">$ai_trace_id</code>); a <code class="inline">data_sources</code> property (from the skill's <code class="inline">env:</code> frontmatter) records which APIs it can hit; tool usage counts are parsed from the session transcript</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">3 · Cost &amp; turns per task?</td>
+            <td><span class="badge badge-error badge-soft">nothing</span> — wall-clock duration only</td>
+            <td>one <code class="inline">$ai_generation</code> per LLM call with <code class="inline">$ai_input_tokens</code> / <code class="inline">$ai_output_tokens</code> / cache tokens; <strong>PostHog computes USD cost automatically</strong> by matching <code class="inline">$ai_model</code>+<code class="inline">$ai_provider</code> against OpenRouter pricing; turns = generations per trace</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">PostHog's AI event model in 30 seconds</h2>
+    <div class="grid gap-4 lg:grid-cols-3">
+      <div class="card card-border bg-base-100"><div class="card-body">
+        <h3 class="card-title text-lg"><code class="inline">$ai_trace</code></h3>
+        <p class="text-sm text-base-content/80">One task or session — groups everything below via
+        <code class="inline">$ai_trace_id</code>. Aggregated tokens + latency. Multi-conversation
+        grouping via <code class="inline">$ai_session_id</code>.</p>
+      </div></div>
+      <div class="card card-border bg-base-100"><div class="card-body">
+        <h3 class="card-title text-lg"><code class="inline">$ai_span</code></h3>
+        <p class="text-sm text-base-content/80">A step inside a trace — a tool execution, retrieval,
+        or (for us) <strong>a skill run</strong>. Has <code class="inline">$ai_span_id</code>,
+        <code class="inline">$ai_span_name</code>, <code class="inline">$ai_parent_id</code>, duration,
+        input/output, error info.</p>
+      </div></div>
+      <div class="card card-border bg-base-100"><div class="card-body">
+        <h3 class="card-title text-lg"><code class="inline">$ai_generation</code></h3>
+        <p class="text-sm text-base-content/80">One LLM call: <code class="inline">$ai_model</code>,
+        <code class="inline">$ai_provider</code>, <code class="inline">$ai_input</code>,
+        <code class="inline">$ai_output_choices</code>, tokens (incl.
+        <code class="inline">$ai_cache_read_input_tokens</code> /
+        <code class="inline">$ai_cache_creation_input_tokens</code> — Anthropic-aware),
+        <code class="inline">$ai_latency</code>, <code class="inline">$ai_stop_reason</code>, and cost
+        (<code class="inline">$ai_total_cost_usd</code>, auto-derived if omitted).</p>
+      </div></div>
+    </div>
+    <p class="text-sm text-base-content/60">All are ordinary PostHog events — they flow through the same
+    <code class="inline">POST /capture/</code> API our curl already uses; the <code class="inline">$ai_*</code>
+    names are what light up the LLM analytics dashboard. Pricing note: first 100k LLM events/month free,
+    then ~$0.00006/event.</p>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Decision: we own the pipeline</h2>
+    <div role="alert" class="alert alert-success">
+      <div class="text-sm">
+        <strong>Direction chosen:</strong> analyst-kit owns the whole analytics pipeline — no dependency on
+        PostHog's Claude Code plugin — because the kit must observe the agent identically across harnesses
+        (Claude Code plugin, Codex, OpenClaw, Cowork, installer). Hooks are an <em>accuracy upgrade</em> on
+        the plugin channel; the Preamble/Completion markdown blocks are the universal fallback, where
+        <strong>the agent itself is the instrumentation</strong>.
+      </div>
+    </div>
+
+    <h3 class="text-xl font-bold">Minimum event set — 3 events + a pricing trick</h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-zebra">
+        <thead><tr><th>Event</th><th>Fired when</th><th>Carries</th><th>Answers</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="whitespace-nowrap"><code class="inline">task_started</code> <span class="badge badge-primary badge-sm">new</span></td>
+            <td>user prompt (<code class="inline">UserPromptSubmit</code> hook); first skill Preamble on hook-less harnesses</td>
+            <td><code class="inline">task_id</code>, <code class="inline">session_id</code>, <code class="inline">prompt_chars</code>; <strong>raw prompt only on the <code class="inline">full</code> tier</strong>; writes the crash-anchor marker</td>
+            <td>Q1 (raw, <code class="inline">full</code> tier) + makes crashed/abandoned tasks visible</td>
+          </tr>
+          <tr>
+            <td class="whitespace-nowrap"><code class="inline">task_completed</code> <span class="badge badge-primary badge-sm">new</span></td>
+            <td><code class="inline">Stop</code> hook; skill Completion epilogue on hook-less harnesses</td>
+            <td><strong>agent-written one-line <code class="inline">intent_summary</code></strong>, <code class="inline">outcome</code>, <code class="inline">turns</code>, <code class="inline">generations</code>, <code class="inline">duration_s</code>, tokens ×4 (in/out/cache-read/cache-write), <code class="inline">models[]</code>, <code class="inline">tools{}</code>, <code class="inline">skills[]</code>, <code class="inline">data_sources[]</code>, <code class="inline">source: hook|agent</code></td>
+            <td><strong>Q1 + Q2 + Q3</strong> — the workhorse; one event answers all three at task granularity</td>
+          </tr>
+          <tr>
+            <td class="whitespace-nowrap"><code class="inline">skill_run</code> <span class="badge badge-ghost badge-sm">existing +</span></td>
+            <td>skill Completion (unchanged)</td>
+            <td>adds <code class="inline">task_id</code>, <code class="inline">session_id</code>, <code class="inline">data_sources</code>; keeps per-skill outcome, duration, CRASH detection</td>
+            <td>Q2 per-skill detail, joinable to its task</td>
+          </tr>
+          <tr>
+            <td class="whitespace-nowrap"><code class="inline">$ai_generation</code> <span class="badge badge-secondary badge-sm">aggregate</span></td>
+            <td>alongside <code class="inline">task_completed</code>, one per model used in the task</td>
+            <td>content-free: <code class="inline">$ai_trace_id</code> = task_id, <code class="inline">$ai_model</code>, <code class="inline">$ai_provider</code>, summed tokens incl. cache</td>
+            <td>Q3 cost — <strong>PostHog auto-prices the tokens</strong> (model+provider → OpenRouter pricing), so we never maintain a pricing table; token→USD is linear, so per-model aggregation stays exact</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div role="alert" class="alert alert-info alert-soft">
+      <span><strong>UI refinement (recommended):</strong> additionally emit a <code class="inline">$ai_trace</code>
+      alias per task (<code class="inline">$ai_trace_id</code> = task_id, <code class="inline">$ai_span_name</code> =
+      <code class="inline">intent_summary</code> — that's the trace's display name in PostHog,
+      <code class="inline">$ai_latency</code> = duration, <code class="inline">$ai_is_error</code> on ERROR/CRASH) and a
+      <code class="inline">$ai_span</code> alias per skill run. Cost: +1 event per task, +1 per skill run. Payoff: the
+      built-in LLM analytics Traces tab becomes a readable task log with drill-down waterfalls — see
+      "Seeing it in PostHog" below.</span>
+    </div>
+
+    <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div id="payload-task-started"></div>
+      <div id="payload-task-completed"></div>
+      <div id="payload-ai-aggregate"></div>
+    </div>
+
+    <h3 class="text-xl font-bold">The intent trick — Q1 on every harness, no extra LLM call</h3>
+    <p class="max-w-3xl text-base-content/80 text-sm">
+      We never summarize the prompt programmatically. <strong>The agent that did the task writes the one-line
+      <code class="inline">intent_summary</code> itself</strong>, as part of the Completion epilogue it already runs
+      (the same instruction-following mechanism that fills in <code class="inline">OUTCOME</code> today). Hooks
+      capture but can't summarize; a separate LLM call would need a key, latency, and spend; the agent has the
+      full conversation in context and the marginal cost is ~30 output tokens inside a turn that's already
+      running. Crucially it summarizes <em>the realized task, not the literal prompt</em> — a follow-up like
+      "now do the same for AMD" or "continue" yields "comparative deep dive on AMD — datacenter growth", which
+      no prompt-only summarizer could produce.
+    </p>
+    <div class="grid gap-4 lg:grid-cols-2">
+      <div id="epilogue-diff"></div>
+      <div class="space-y-3">
+        <div class="mermaid-wrap">
+          <pre class="mermaid">
+sequenceDiagram
+  participant U as User
+  participant H as Hooks
+  participant A as Agent
+  participant T as analyst-kit-track
+  participant P as PostHog
+  U->>H: prompt (UserPromptSubmit)
+  H->>T: task-start
+  T->>P: task_started
+  A->>A: runs skills, does the work
+  A->>T: epilogue: task-end --intent "…" --outcome DONE
+  T->>T: hooks active → stash intent + outcome in task state file
+  A-->>U: final answer
+  U->>H: turn ends (Stop)
+  H->>T: task-end (hook mode)
+  T->>T: parse transcript delta: tokens, tools, models
+  T->>P: task_completed (merged) + $ai_generation per model
+          </pre>
+        </div>
+        <ul class="list-disc list-inside text-xs text-base-content/70 space-y-1">
+          <li><strong>Dedup between epilogue and Stop hook:</strong> the SessionStart hook drops a "hooks active" marker; when present, the epilogue call only writes state and the Stop hook emits; when absent (Codex/installer), the epilogue call emits <code class="inline">task_completed</code> directly with <code class="inline">source:"agent"</code>.</li>
+          <li><strong>Skill-less tasks:</strong> no epilogue ran → <code class="inline">intent_summary</code> is null (metrics still sent on the hook channel; raw prompt fills the gap on the <code class="inline">full</code> tier).</li>
+          <li><strong>Quality control:</strong> the template shows the format and an example; length capped at 140 chars by <code class="inline">analyst-kit-track</code>.</li>
+          <li><strong>Crash case:</strong> if the agent died after the epilogue, the stashed intent still ships with the swept <code class="inline">task_completed {crashed:true}</code>.</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3 class="text-xl font-bold">Fidelity by harness</h3>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-sm table-zebra">
+        <thead><tr><th>Signal</th><th>Claude Code plugin (hooks)</th><th>Codex / OpenClaw / installer (agent-driven)</th></tr></thead>
+        <tbody>
+          <tr><td>Task boundary</td><td>exact — prompt → <code class="inline">Stop</code></td><td>approximate — Preamble → Completion; skill-engaged tasks only</td></tr>
+          <tr><td>Raw prompt (<code class="inline">full</code> tier)</td><td>✅ hook stdin</td><td>—</td></tr>
+          <tr><td><code class="inline">intent_summary</code></td><td>✅ agent via epilogue</td><td>✅ agent via epilogue</td></tr>
+          <tr><td>Tokens / generations / cost</td><td>✅ transcript parse</td><td>— (fields omitted; <code class="inline">source:"agent"</code> marks it)</td></tr>
+          <tr><td><code class="inline">tools{}</code> breakdown</td><td>✅ transcript parse</td><td>skills only (via <code class="inline">skill_run</code>)</td></tr>
+          <tr><td>Duration, outcome, crash detection</td><td>✅</td><td>✅ (existing marker pattern)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-sm text-base-content/60 max-w-3xl">
+      Coverage caveat: on agent-driven channels, a task that never engages a skill emits nothing (no
+      preamble ran). On the plugin channel it still emits <code class="inline">task_started</code>/<code class="inline">task_completed</code>
+      with full metrics — just no <code class="inline">intent_summary</code> unless the tier is <code class="inline">full</code>.
+    </p>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Architecture (owned pipeline)</h2>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">
+flowchart TD
+  SS["SessionStart hook (exists)<br/>writes ~/.analyst-kit/current-session"] --> UP
+  UP["UserPromptSubmit hook (plugin channel)<br/>mints task_id · raw prompt on full tier"] -- "task_started" --> TRACK
+  PRE["Skill Preamble (all channels)<br/>task_started fallback if no hook ran"] -- "task_started (source: agent)" --> TRACK
+  PRE --> EPI
+  EPI["Completion epilogue (all channels)<br/>agent writes --intent + OUTCOME"] -- "skill_run (+task_id, data_sources)" --> TRACK
+  EPI -- "task_completed (source: agent,<br/>hook-less channels only)" --> TRACK
+  STOPH["Stop hook (plugin channel)<br/>parses transcript delta:<br/>tokens · models · tools · generations"] -- "task_completed (source: hook)<br/>+ $ai_generation per model" --> TRACK
+  TRACK["bin/analyst-kit-track (new)<br/>tier gate · local JSONL mirror · fire-and-forget curl"]
+  TRACK --> LOCAL[("~/.analyst-kit/analytics/*.jsonl<br/>always, all tiers")]
+  TRACK --> GATE{"telemetry tier"}
+  GATE -- "off / anonymous / community" --> MIN["skill_run only (today's behavior)"]
+  GATE -- "insights / full" --> PH["PostHog POST /capture/<br/>task_started · task_completed ·<br/>skill_run · $ai_generation"]
+  style PH fill:#4c3a99,stroke:#8b7ad9,color:#fff
+  style LOCAL fill:#3a3a4c,stroke:#777,color:#eee
+  style TRACK fill:#2d4a2d,stroke:#5a9a5a,color:#fff
+      </pre>
+    </div>
+    <p class="text-sm text-base-content/60 max-w-3xl">
+      One new bin (<code class="inline">analyst-kit-track</code>) with the same defensive contract as
+      <code class="inline">analyst-kit-log</code>: never exits non-zero, never blocks, local JSONL always,
+      remote leg gated and backgrounded. <code class="inline">skill_run</code> keeps flowing through
+      <code class="inline">analyst-kit-log</code> unchanged apart from the three new properties.
+    </p>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">The consent problem — this changes the privacy promise</h2>
+    <div role="alert" class="alert alert-warning">
+      <div>
+        <h3 class="font-bold">Prompts are exactly what we promise never to send</h3>
+        <div class="text-sm">
+          The current pledge (SKILL.md, onboarding, this page): remote events <em>never</em> include repo
+          names, paths, tickers, or content. Task intent in a hedge-fund workflow <em>is</em> tickers, theses,
+          and client material — so intent capture cannot ride on the existing
+          <code class="inline">community</code> tier. It lives behind two new explicit opt-in tiers
+          (<code class="inline">insights</code>: agent-written summary; <code class="inline">full</code>: raw prompt),
+          and the defaults stay exactly as they are today.
+        </div>
+      </div>
+    </div>
+    <div class="overflow-x-auto rounded-box border border-base-content/5 bg-base-100">
+      <table class="table table-sm table-zebra">
+        <thead><tr><th>Tier</th><th><code class="inline">skill_run</code></th><th>Task metrics (tokens, cost, turns, tools — content-free)</th><th><code class="inline">intent_summary</code> (agent-written line)</th><th>Raw prompt</th></tr></thead>
+        <tbody>
+          <tr><td><code class="inline">off</code></td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td><code class="inline">anonymous</code> / <code class="inline">community</code> <span class="badge badge-ghost badge-sm">unchanged defaults</span></td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td><code class="inline">insights</code> <span class="badge badge-primary badge-sm">new, opt-in</span></td><td>✅</td><td>✅</td><td>✅</td><td>—</td></tr>
+          <tr><td><code class="inline">full</code> <span class="badge badge-secondary badge-sm">new, opt-in</span></td><td>✅</td><td>✅</td><td>✅</td><td>✅ (hook channels, truncated)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-sm text-base-content/70 max-w-3xl">
+      <code class="inline">intent_summary</code> and raw prompts contain tickers and thesis material, so both new
+      tiers are explicit opt-ins offered at onboarding — and the onboarding/SKILL.md privacy copy
+      ("never tickers or content") must be rewritten to describe tiers honestly before this ships.
+    </p>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Implementation sketch</h2>
+    <div class="grid gap-4 lg:grid-cols-2">
+      <div id="hooks-json"></div>
+      <div id="ai-log-sketch"></div>
+    </div>
+    <p class="text-sm text-base-content/70 max-w-3xl">
+      Query patterns once this lands — <strong>Q1:</strong> table of <code class="inline">task_completed.intent_summary</code>;
+      <strong>Q2:</strong> breakdown by <code class="inline">skills[]</code> / <code class="inline">tools{}</code>, or
+      <code class="inline">skill_run</code> joined on <code class="inline">task_id</code>;
+      <strong>Q3:</strong> <code class="inline">sum($ai_total_cost_usd) by $ai_trace_id</code> (PostHog computed) plus
+      <code class="inline">turns</code> / <code class="inline">generations</code> / <code class="inline">duration_s</code>
+      straight off <code class="inline">task_completed</code>. Cost per <em>skill</em>: average task cost grouped by
+      the task's <code class="inline">skills[]</code>.
+    </p>
+  </section>
+
+  <!-- ============ SEEING IT IN POSTHOG ============ -->
+  <section class="space-y-6">
+    <h2 class="text-2xl font-bold">Seeing it in PostHog</h2>
+    <p class="max-w-3xl text-base-content/80 text-sm">
+      Two surfaces consume our events. The built-in <strong>LLM analytics</strong> product (Dashboard /
+      Traces / Generations tabs) lights up automatically from the <code class="inline">$ai_*</code> aliases —
+      no dashboard building. <strong>Product analytics</strong> (Trends, SQL insights) works over
+      <code class="inline">task_completed</code> / <code class="inline">skill_run</code> for anything custom.
+    </p>
+
+    <div class="space-y-3">
+      <h3 class="text-xl font-bold">1 · The task — LLM analytics → Traces tab</h3>
+      <p class="text-sm text-base-content/80 max-w-3xl">
+        One row per task. Because the <code class="inline">$ai_trace</code> alias carries
+        <code class="inline">$ai_span_name</code> = <code class="inline">intent_summary</code>, the list reads like a
+        task log: what every install is doing, with cost and latency per task, filterable by any property
+        (skill, platform, tier, outcome).
+      </p>
+      <div class="mockup-browser border border-base-300 bg-base-100">
+        <div class="mockup-browser-toolbar"><div class="input">us.posthog.com/llm-analytics/traces</div></div>
+        <div class="p-4 bg-base-200 overflow-x-auto">
+          <table class="table table-sm bg-base-100 rounded-box">
+            <thead><tr><th>Trace</th><th>Person</th><th>Total cost</th><th>Latency</th><th>When</th></tr></thead>
+            <tbody>
+              <tr><td>deep dive on NVDA — datacenter growth vs AMD</td><td class="font-mono text-xs">9f3c…0a34</td><td>$0.87</td><td>6m 52s</td><td>09:15</td></tr>
+              <tr><td>13F comparison — Berkshire vs Bridgewater Q2 adds</td><td class="font-mono text-xs">9f3c…0a34</td><td>$0.31</td><td>2m 36s</td><td>09:41</td></tr>
+              <tr><td>earnings preview on TSLA — margin trajectory</td><td class="font-mono text-xs">41b2…7c09</td><td>$0.54</td><td>3m 53s</td><td>10:02</td></tr>
+              <tr class="opacity-60"><td>ERROR · sector map on semis — HBM supply chain</td><td class="font-mono text-xs">d201…88ef</td><td>$0.12</td><td>0m 48s</td><td>10:19</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-3">
+      <h3 class="text-xl font-bold">2 · Skills &amp; tools — trace drill-down + breakdowns</h3>
+      <p class="text-sm text-base-content/80 max-w-3xl">
+        Clicking a trace opens PostHog's timeline/waterfall: our <code class="inline">$ai_span</code> aliases nest the
+        skill runs inside the task (red-bordered on error), with the per-model generation aggregates alongside.
+        Fleet-level breakdowns come from SQL over <code class="inline">task_completed</code>:
+      </p>
+      <div class="mockup-browser border border-base-300 bg-base-100">
+        <div class="mockup-browser-toolbar"><div class="input">trace b41c… — deep dive on NVDA</div></div>
+        <div class="p-4 bg-base-200 space-y-2 text-xs font-mono">
+          <div class="flex items-center gap-2"><span class="w-56 shrink-0 truncate">▾ task: deep dive on NVDA</span><div class="flex-1"><div class="h-3 rounded bg-base-content/25" style="width:100%"></div></div><span class="w-14 text-right">412s</span></div>
+          <div class="flex items-center gap-2"><span class="w-56 shrink-0 truncate pl-4">span · single-stock-deep-dive</span><div class="flex-1"><div class="h-3 rounded bg-primary/70" style="width:52%;margin-left:2%"></div></div><span class="w-14 text-right">214s</span></div>
+          <div class="flex items-center gap-2"><span class="w-56 shrink-0 truncate pl-4">span · charting</span><div class="flex-1"><div class="h-3 rounded bg-primary/70" style="width:9%;margin-left:58%"></div></div><span class="w-14 text-right">38s</span></div>
+          <div class="flex items-center gap-2"><span class="w-56 shrink-0 truncate pl-4">span · reporting</span><div class="flex-1"><div class="h-3 rounded bg-primary/70" style="width:15%;margin-left:70%"></div></div><span class="w-14 text-right">61s</span></div>
+          <div class="flex items-center gap-2"><span class="w-56 shrink-0 truncate pl-4">generation · claude-opus-4-8 (aggregate)</span><div class="flex-1"><div class="h-3 rounded bg-secondary/70" style="width:96%;margin-left:2%"></div></div><span class="w-14 text-right">$0.87</span></div>
+        </div>
+      </div>
+      <div id="hogql-tools"></div>
+    </div>
+
+    <div class="space-y-3">
+      <h3 class="text-xl font-bold">3 · Cost, time &amp; turns — built-in dashboard + one SQL table</h3>
+      <p class="text-sm text-base-content/80 max-w-3xl">
+        The stock <strong>LLM analytics dashboard</strong> (Users · Traces · Costs · Generations · Latency tiles)
+        answers "total cost, cost by model, cost per user" with zero setup, because PostHog computed
+        <code class="inline">$ai_total_cost_usd</code> on our aggregates at ingestion. The per-task view is one
+        SQL insight, saveable as a dashboard tile:
+      </p>
+      <div id="hogql-cost"></div>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Risks &amp; mitigations</h2>
+    <ul class="list-disc list-inside text-sm text-base-content/80 space-y-2 max-w-3xl">
+      <li><strong>Transcript format drift</strong>: the session JSONL is not a stable public API; the parser must be defensive and fail silent — a parse failure sends <code class="inline">task_completed</code> with <code class="inline">source:"agent"</code> fields only, never nothing.</li>
+      <li><strong>Agent-as-instrumentation is best-effort</strong>: on hook-less channels the epilogue depends on the agent actually running it (same trust level as today's <code class="inline">skill_run</code>); the <code class="inline">source</code> property lets dashboards separate deterministic from agent-reported data.</li>
+      <li><strong>Intent quality drift</strong>: agents may write vague summaries; the epilogue template should show a one-line example format ("&lt;action&gt; on &lt;subject&gt; for &lt;goal&gt;") and cap length.</li>
+      <li><strong>Payload size</strong>: raw prompts (full tier) are truncated to a fixed cap before the curl; <code class="inline">intent_summary</code> capped at ~140 chars.</li>
+      <li><strong>Event volume</strong>: ~3–6 events per task (no per-tool events by design) — negligible against PostHog's 100k/month free LLM-event allowance.</li>
+      <li><strong>python3 dependency</strong> for the transcript parse — acceptable; several skills already require python, and its absence just downgrades to agent-level fidelity.</li>
+      <li><strong>Privacy promise change</strong>: <code class="inline">insights</code>/<code class="inline">full</code> carry task content (summaries contain tickers). Onboarding + SKILL.md copy must be rewritten and both tiers kept strictly opt-in; <code class="inline">community</code> default behavior is unchanged.</li>
+    </ul>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold">Decisions recorded</h2>
+    <div role="alert" class="alert alert-success">
+      <div class="text-sm">
+        <strong>Both settled (2026-07-07):</strong> (1) <strong>one user prompt = one task</strong> — follow-ups
+        are new tasks, rolled up by <code class="inline">session_id</code>; (2) <strong>intent summaries name
+        tickers</strong> — the "never tickers or content" copy in SKILL.md/onboarding will be rewritten to
+        describe the tiers honestly instead. <code class="inline">community</code> stays the default;
+        <code class="inline">insights</code>/<code class="inline">full</code> are explicit opt-ins.
+      </div>
+    </div>
+    <p class="text-sm text-base-content/70 max-w-3xl">
+      Next steps: build <code class="inline">bin/analyst-kit-track</code> + the transcript-delta parser, extend
+      <code class="inline">hooks/hooks.json</code> (UserPromptSubmit / Stop / SessionEnd), add
+      <code class="inline">--intent</code> to the epilogue template (+ <code class="inline">npm run sync:preamble</code>),
+      add <code class="inline">task_id</code>/<code class="inline">data_sources</code> to
+      <code class="inline">analyst-kit-log</code>, and rewrite the telemetry copy in SKILL.md + onboarding for the
+      new tiers.
+    </p>
+  </section>
+
+  <footer class="text-sm text-base-content/50 border-t border-base-content/10 pt-4">
+    Sources: <code class="inline">skills/analyst-kit-core/bin/analyst-kit-log</code> ·
+    <code class="inline">bin/analyst-kit-preamble</code> · <code class="inline">bin/analyst-kit-config</code> ·
+    <code class="inline">bin/analyst-kit-session-hook</code> · <code class="inline">bin/analyst-kit-setup</code> (ensure_identity) ·
+    <code class="inline">skills/sec-filings/scripts/edgar.py</code> (_default_ua) ·
+    <code class="inline">templates/preamble.md.tmpl</code> / <code class="inline">epilogue.md.tmpl</code> ·
+    <code class="inline">SKILL.md</code> ("Telemetry tiers"). Generated 2026-07-07.
+  </footer>
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    securityLevel: "strict",
+    themeVariables: {
+      darkMode: true,
+      background: "#1a1a24",
+      primaryColor: "#2c2c3a",
+      primaryTextColor: "#e8e4d8",
+      primaryBorderColor: "#6b6b7d",
+      lineColor: "#9a9ab0",
+      secondaryColor: "#3a3a4c",
+      tertiaryColor: "#24242f",
+      fontSize: "14px"
+    }
+  });
+</script>
+
+<script type="module">
+  import { File, FileDiff } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+  const theme = { light: "github-light", dark: "github-dark" };
+  const options = { theme, themeType: "dark", overflow: "wrap" };
+
+  new FileDiff({ ...options, diffStyle: "unified" }).render({
+    containerWrapper: document.querySelector("#epilogue-diff"),
+    oldFile: {
+      name: "skills/analyst-kit-core/templates/epilogue.md.tmpl",
+      contents: `PLAN MODE EXCEPTION — ALWAYS RUN: writes only to ~/.analyst-kit/.
+Replace OUTCOME with one of DONE | DONE_WITH_CONCERNS | ERROR | ABORT | NEEDS_CONTEXT.
+
+\`\`\`bash
+_AK="$(cat ~/.analyst-kit/core-path 2>/dev/null)"
+[ -x "$_AK/bin/analyst-kit-log" ] && "$_AK/bin/analyst-kit-log" end --skill {{SKILL}} --outcome OUTCOME 2>/dev/null || true
+\`\`\`
+`,
+    },
+    newFile: {
+      name: "skills/analyst-kit-core/templates/epilogue.md.tmpl",
+      contents: `PLAN MODE EXCEPTION — ALWAYS RUN: writes only to ~/.analyst-kit/.
+Replace OUTCOME with one of DONE | DONE_WITH_CONCERNS | ERROR | ABORT | NEEDS_CONTEXT.
+Replace INTENT with ONE line (<=140 chars) describing what the user asked for in this
+task — format "<action> on <subject> — <goal>", include tickers/topics. Summarize the
+task you actually performed, not the literal prompt (a "continue" or "same for AMD"
+follow-up gets the real task). Example: "deep dive on NVDA — datacenter growth vs AMD".
+
+\`\`\`bash
+_AK="$(cat ~/.analyst-kit/core-path 2>/dev/null)"
+[ -x "$_AK/bin/analyst-kit-log" ] && "$_AK/bin/analyst-kit-log" end --skill {{SKILL}} --outcome OUTCOME 2>/dev/null || true
+[ -x "$_AK/bin/analyst-kit-track" ] && "$_AK/bin/analyst-kit-track" task-end --skill {{SKILL}} \\
+  --outcome OUTCOME --intent "INTENT" 2>/dev/null || true
+\`\`\`
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#local-jsonl"),
+    file: {
+      name: "~/.analyst-kit/analytics/skill-usage.jsonl (example)",
+      contents: `{"event":"start","skill":"charting","ts":"2026-07-07T09:08:50Z","version":"1.4.2","repo":"hedge-fund-ai","session":"81234"}
+{"event":"end","skill":"charting","ts":"2026-07-07T09:14:02Z","version":"1.4.2","outcome":"DONE","duration_s":312,"session":"81234"}
+{"event":"end","skill":"reporting","ts":"2026-07-07T09:14:02Z","version":"1.4.2","outcome":"CRASH","duration_s":0,"session":"stale"}
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#payload-json"),
+    file: {
+      name: "POST https://us.i.posthog.com/capture/  (Content-Type: application/json)",
+      contents: `{
+  "api_key": "phc_SjGbGkatye7YiBgXi54qbs9iwerxm7xP1rKu387S8VD",
+  "event": "skill_run",
+  "distinct_id": "9f3c1a7e42d84b0f8a2e5c6d1b9f0a34",
+  "timestamp": "2026-07-07T09:14:02Z",
+  "properties": {
+    "skill": "charting",
+    "version": "1.4.2",
+    "outcome": "DONE",
+    "duration_s": 312,
+    "platform": "claude-plugin",
+    "tier": "community"
+  }
+}
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#hogql-tools"),
+    file: {
+      name: "SQL insight — skill & tool breakdowns (HogQL)",
+      contents: `-- Tool usage: how many tasks touched each tool (30 days)
+SELECT arrayJoin(JSONExtractKeys(properties.tools)) AS tool,
+       count() AS tasks
+FROM events
+WHERE event = 'task_completed'
+  AND timestamp > now() - INTERVAL 30 DAY
+GROUP BY tool ORDER BY tasks DESC;
+
+-- Skill mix across tasks (which skills co-occur per task)
+SELECT arrayJoin(JSONExtractArrayRaw(properties.skills)) AS skill,
+       count() AS tasks,
+       round(avg(toFloat(properties.duration_s)), 0) AS avg_seconds
+FROM events
+WHERE event = 'task_completed'
+GROUP BY skill ORDER BY tasks DESC;
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#hogql-cost"),
+    file: {
+      name: "SQL insight — the task table: what, cost, turns, time (HogQL)",
+      contents: `WITH costs AS (
+  SELECT properties.$ai_trace_id AS task_id,
+         sum(toFloat(properties.$ai_total_cost_usd)) AS cost_usd  -- computed by PostHog at ingestion
+  FROM events
+  WHERE event = '$ai_generation'
+  GROUP BY task_id
+)
+SELECT e.properties.intent_summary            AS task,
+       round(costs.cost_usd, 2)               AS cost_usd,
+       e.properties.turns                     AS turns,
+       e.properties.generations               AS llm_calls,
+       round(toFloat(e.properties.duration_s) / 60, 1) AS minutes,
+       e.properties.outcome                   AS outcome
+FROM events e
+LEFT JOIN costs ON costs.task_id = e.properties.task_id
+WHERE e.event = 'task_completed'
+ORDER BY e.timestamp DESC;
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#payload-task-started"),
+    file: {
+      name: "task_started (tier: insights — no content)",
+      contents: `{
+  "event": "task_started",
+  "distinct_id": "<device-id>",
+  "timestamp": "2026-07-07T09:08:41Z",
+  "properties": {
+    "task_id": "b41c…",
+    "session_id": "cc-9f27…",
+    "prompt_chars": 214,
+    "source": "hook",
+    "platform": "claude-plugin",
+    "version": "1.4.2",
+    "tier": "insights"
+  }
+}
+// tier=full adds:
+//   "intent": "<raw prompt, truncated>"
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#payload-task-completed"),
+    file: {
+      name: "task_completed (the workhorse)",
+      contents: `{
+  "event": "task_completed",
+  "distinct_id": "<device-id>",
+  "timestamp": "2026-07-07T09:15:33Z",
+  "properties": {
+    "task_id": "b41c…",
+    "session_id": "cc-9f27…",
+    "intent_summary":
+      "deep dive on NVDA DC growth vs AMD",
+    "outcome": "DONE",
+    "turns": 1,
+    "generations": 14,
+    "duration_s": 412,
+    "input_tokens": 182340,
+    "output_tokens": 9120,
+    "cache_read_tokens": 160200,
+    "cache_creation_tokens": 8400,
+    "models": ["claude-opus-4-8"],
+    "tools": {"Bash": 22, "Read": 9,
+              "WebFetch": 4, "Skill": 3},
+    "skills": ["single-stock-deep-dive",
+               "charting", "reporting"],
+    "data_sources": ["FMP", "SEC_EDGAR"],
+    "source": "hook",
+    "crashed": false,
+    "platform": "claude-plugin",
+    "version": "1.4.2",
+    "tier": "insights"
+  }
+}
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#payload-ai-aggregate"),
+    file: {
+      name: "$ai_generation aggregate (one per model — buys free cost)",
+      contents: `{
+  "event": "$ai_generation",
+  "distinct_id": "<device-id>",
+  "timestamp": "2026-07-07T09:15:33Z",
+  "properties": {
+    "$ai_trace_id": "b41c…",
+    "$ai_span_name": "task-aggregate",
+    "$ai_model": "claude-opus-4-8",
+    "$ai_provider": "anthropic",
+    "$ai_input_tokens": 182340,
+    "$ai_output_tokens": 9120,
+    "$ai_cache_read_input_tokens": 160200,
+    "$ai_cache_creation_input_tokens": 8400,
+    "$ai_latency": 412
+  }
+}
+// no $ai_input / $ai_output_choices —
+// content never rides on this event.
+// PostHog derives $ai_total_cost_usd
+// from model+provider pricing.
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#hooks-json"),
+    file: {
+      name: "plugins/analyst-kit/hooks/hooks.json (proposed — note: no PostToolUse needed)",
+      contents: `{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command",
+      "command": "\${CLAUDE_PLUGIN_ROOT}/skills/analyst-kit-core/bin/analyst-kit-session-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "\${CLAUDE_PLUGIN_ROOT}/skills/analyst-kit-core/bin/analyst-kit-track task-start" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "\${CLAUDE_PLUGIN_ROOT}/skills/analyst-kit-core/bin/analyst-kit-track task-end" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command",
+      "command": "\${CLAUDE_PLUGIN_ROOT}/skills/analyst-kit-core/bin/analyst-kit-track session-end" }] }]
+  }
+}
+// Tool usage comes from the transcript parse at Stop time, so no per-tool
+// hook (and no per-tool event volume) is required. SessionEnd only closes
+// a dangling task if the session dies between prompt and Stop.
+`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#ai-log-sketch"),
+    file: {
+      name: "bin/analyst-kit-track (sketch — same defensive contract as analyst-kit-log)",
+      contents: `#!/usr/bin/env bash
+# Hook payload arrives as JSON on stdin: session_id, transcript_path,
+# and per-event fields (prompt / reason). Epilogue calls pass flags instead.
+IN="$(cat)"; CMD="\${1:-}"
+TIER="$("$DIR/analyst-kit-config" get telemetry)"  # off|anonymous|community|insights|full
+# task state lives in ~/.analyst-kit/tasks/<session>.current (crash anchor,
+# byte cursor into the transcript, agent-written intent file)
+
+case "$CMD" in
+  task-start)   # UserPromptSubmit hook (or Preamble fallback: --source agent)
+    # mint task_id; sweep stale task markers -> task_completed{crashed:true}
+    # tier=full  -> intent = raw prompt, truncated to AK_MAX_PROMPT_CHARS
+    # tier>=insights -> emit task_started {task_id, prompt_chars, source}
+    ;;
+  task-end)     # Stop hook (or Completion epilogue: --intent "<line>" --outcome DONE)
+    # python3 transcript-delta.py <transcript_path> <cursor>:
+    #   turns, generations, models[], tools{}, in/out/cache tokens
+    # merge agent-written intent + skills[]/data_sources[] from this task's
+    # skill_run records; emit task_completed
+    # then one content-free \\$ai_generation per model (summed tokens,
+    # \\$ai_trace_id = task_id) -> PostHog derives USD; no pricing table here
+    ;;
+  session-end)  # close a dangling task (died between prompt and Stop)
+    ;;
+esac
+exit 0   # never fail, never block`,
+    },
+  });
+
+  new File(options).render({
+    containerWrapper: document.querySelector("#posthog-fn"),
+    file: {
+      name: "skills/analyst-kit-core/bin/analyst-kit-log  (posthog() — lines 49-66)",
+      contents: `posthog() { # $1=outcome $2=duration_s — fire-and-forget, consent-gated
+  [ "$TIER" = "off" ] && return 0
+  KEY="\${AK_POSTHOG_KEY:-$("$DIR/analyst-kit-config" get posthog_key 2>/dev/null)}"
+  # PostHog project API keys are public write-only ingest keys — safe to embed.
+  KEY="\${KEY:-phc_SjGbGkatye7YiBgXi54qbs9iwerxm7xP1rKu387S8VD}"
+  HOST="\${AK_POSTHOG_HOST:-$("$DIR/analyst-kit-config" get posthog_host 2>/dev/null)}"
+  HOST="\${HOST:-https://us.i.posthog.com}"
+  DID="anon"
+  if [ "$TIER" = "community" ]; then
+    if [ ! -f "$AK_HOME/device-id" ]; then
+      (uuidgen 2>/dev/null || od -An -N16 -tx1 /dev/urandom | tr -d ' \\n') > "$AK_HOME/device-id" 2>/dev/null || true
+    fi
+    DID="$(cat "$AK_HOME/device-id" 2>/dev/null || echo anon)"
+  fi
+  curl -sf --max-time 3 -X POST "$HOST/capture/" -H 'Content-Type: application/json' \\
+    -d "{\\"api_key\\":\\"$KEY\\",\\"event\\":\\"skill_run\\",\\"distinct_id\\":\\"$DID\\",\\"timestamp\\":\\"$TS\\",\\"properties\\":{\\"skill\\":\\"$SKILL\\",\\"version\\":\\"$VER\\",\\"outcome\\":\\"$1\\",\\"duration_s\\":\${2:-0},\\"platform\\":\\"$PLATFORM\\",\\"tier\\":\\"$TIER\\"}}" \\
+    >/dev/null 2>&1 &
+}
+`,
+    },
+  });
+</script>
+</body>
+</html>
