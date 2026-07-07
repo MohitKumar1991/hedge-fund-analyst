@@ -12,8 +12,13 @@
 #   analyst-kit-setup disable SKILL     turn a skill off (a required API key is missing)
 #   analyst-kit-setup enable SKILL      turn a skill back on
 #   analyst-kit-setup reconcile         enable skills with all keys, disable those missing any
-#   analyst-kit-setup finish            mark onboarding complete (+ telemetry notice)
-#   analyst-kit-setup ensure-identity   generate the one-time user id + SEC EDGAR UA (idempotent)
+#   analyst-kit-setup finish [--name N --email E [--fallback]]
+#                                       mark onboarding complete (+ telemetry notice);
+#                                       with an email: record user identity + SEC EDGAR UA
+#   analyst-kit-setup ensure-identity   idempotent identity bootstrap. New installs: probe
+#                                       the hardware/OS device id into device.json (name/
+#                                       email arrive later via `finish`). Legacy installs
+#                                       (a user-id file exists): keep the generated UA.
 #
 # Contract (shared by all analyst-kit-* scripts): defensive, never blocks, never
 # hard-fails the calling skill. Secrets ONLY ever go to <home>/.env (chmod 600),
@@ -118,6 +123,15 @@ status() {
   echo "HOME: $AK_HOME"
   [ -f "$BOOT/home-path" ] && echo "HOME_RELOCATED: yes" || echo "HOME_RELOCATED: no"
   [ -f "$AK_HOME/.onboarded" ] && echo "ONBOARDED: yes" || echo "ONBOARDED: no"
+  if [ -s "$AK_HOME/user.json" ]; then
+    st_email="$(sed -n 's/.*"email": *"\([^"]*\)".*/\1/p' "$AK_HOME/user.json" 2>/dev/null | head -1)"
+    st_src="$(sed -n 's/.*"source": *"\([^"]*\)".*/\1/p' "$AK_HOME/user.json" 2>/dev/null | head -1)"
+    echo "IDENTITY: email=${st_email:-?} source=${st_src:-?}"
+  elif [ -s "$AK_HOME/user-id" ]; then
+    echo "IDENTITY: legacy"
+  else
+    echo "IDENTITY: none"
+  fi
   echo "TELEMETRY: $("$DIR/analyst-kit-config" get telemetry 2>/dev/null || echo community)"
 
   pairs=""; skills=""
@@ -217,30 +231,113 @@ ack_telemetry() {
   echo "telemetry notice acknowledged"
 }
 
+# finish [--name N] [--email E] [--fallback] — mark onboarding complete. With an
+# email: validate it, record USER_INFO in <home>/user.json, and regenerate the SEC
+# EDGAR User-Agent from the real identity (SEC's fair-access policy wants a
+# reachable contact). --fallback marks an email the agent discovered (git config,
+# GitHub) after the user declined to give one — recorded but never treated as
+# verifiable. An invalid email is reported and onboarding is NOT marked complete,
+# so the agent re-asks.
 finish() {
   mkdir -p "$AK_HOME" 2>/dev/null || true
+  f_name=""; f_email=""; f_src="user"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)     shift; f_name="${1:-}" ;;
+      --email)    shift; f_email="${1:-}" ;;
+      --fallback) f_src="fallback" ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+  if [ -n "$f_email" ]; then
+    # Strip characters that would break the JSON / quoted .env line.
+    f_name="$(printf '%s' "$f_name" | tr -d '"\\\r\n')"
+    f_email="$(printf '%s' "$f_email" | tr -d '"\\\r\n ')"
+    if ! printf '%s' "$f_email" | grep -qE '^[^@]+@[^@]+\.[^@]+$'; then
+      echo "INVALID_EMAIL: $f_email — ask again and re-run finish"
+      return 0
+    fi
+    f_now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    printf '{\n  "name": "%s",\n  "email": "%s",\n  "source": "%s",\n  "email_verified": false,\n  "confirmed_at": "%s"\n}\n' \
+      "$f_name" "$f_email" "$f_src" "$f_now" > "$AK_HOME/user.json" 2>/dev/null || true
+    f_env="$AK_HOME/.env"; touch "$f_env" 2>/dev/null || true
+    grep -vE '^SEC_EDGAR_UA=' "$f_env" 2>/dev/null > "$f_env.tmp" || true
+    printf 'SEC_EDGAR_UA="analyst-kit%s %s"\n' "${f_name:+ $f_name}" "$f_email" >> "$f_env.tmp"
+    mv "$f_env.tmp" "$f_env" 2>/dev/null || true
+    chmod 600 "$f_env" 2>/dev/null || true
+    echo "IDENTITY: recorded ($f_src)"
+  fi
   touch "$AK_HOME/.onboarded" "$AK_HOME/.telemetry-prompted" 2>/dev/null || true
   echo "onboarding complete"
 }
 
-# Stable per-install identity. SEC EDGAR wants a contact User-Agent but does not
-# verify it; a generated one keeps installs from sharing a single UA (SEC throttles
-# fair-access by UA). The id is a one-time timestamp; edgar.py derives the UA from it
-# directly, and we also mirror SEC_EDGAR_UA into <home>/.env for sourced contexts.
-# Idempotent and fast — safe to call from every preamble / session start.
+# Best-available machine identifier, hardware/OS first, random last. The raw
+# value IS the device id (design decision: no hashing) — it stays in the data
+# home and telemetry payloads only. Sets PD_ID / PD_SRC.
+probe_device_id() {
+  PD_ID=""; PD_SRC=""
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      PD_ID="$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')"
+      PD_SRC="hardware-uuid" ;;
+    Linux)
+      PD_ID="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null)"
+      PD_SRC="machine-id" ;;
+    MINGW*|MSYS*|CYGWIN*)
+      PD_ID="$(reg query 'HKLM\SOFTWARE\Microsoft\Cryptography' /v MachineGuid 2>/dev/null | awk '/MachineGuid/{print $NF; exit}')"
+      PD_SRC="machine-guid" ;;
+  esac
+  PD_ID="$(printf '%s' "$PD_ID" | tr -d '[:space:]"\\')"
+  if [ -z "$PD_ID" ]; then
+    PD_ID="$(uuidgen 2>/dev/null || od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    PD_SRC="random"
+  fi
+}
+
+# Probe once per install: write device.json (DEVICE_INFO) and the flat device-id
+# file that analyst-kit-log reads. Only for installs that aren't onboarded yet —
+# existing installs keep their lazily-created random id untouched by design.
+ensure_device() {
+  [ -f "$AK_HOME/.onboarded" ] && return 0
+  [ -s "$AK_HOME/device.json" ] && return 0
+  probe_device_id
+  ed_now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  printf '{\n  "id": "%s",\n  "source": "%s",\n  "platform": "%s",\n  "captured_at": "%s"\n}\n' \
+    "$PD_ID" "$PD_SRC" "$(uname -s 2>/dev/null)" "$ed_now" > "$AK_HOME/device.json" 2>/dev/null || true
+  printf '%s' "$PD_ID" > "$AK_HOME/device-id" 2>/dev/null || true
+}
+
+# Idempotent identity bootstrap — safe to call from every preamble / session start.
+#
+# LEGACY installs (a user-id file exists — created by older versions on every
+# session start): keep the original behavior exactly, including the generated
+# akit<id>@gmail.com UA, so nothing changes under existing users (design: the
+# identity flow is new-install-only).
+#
+# NEW installs: capture the hardware/OS device id now (silent, <10ms); the real
+# name/email are collected conversationally by the agent and land via
+# `finish --name --email`. No user-id file and no synthetic UA are created —
+# edgar.py falls back to its generic UA until onboarding completes.
 ensure_identity() {
   mkdir -p "$AK_HOME" 2>/dev/null || true
-  ei_idfile="$AK_HOME/user-id"
-  [ -s "$ei_idfile" ] || printf '%s' "$(date +%s)" > "$ei_idfile" 2>/dev/null || true
-  ei_id="$(tr -dc '0-9' < "$ei_idfile" 2>/dev/null)"; [ -n "$ei_id" ] || ei_id=0
-  if ! key_present SEC_EDGAR_UA; then
-    ei_env="$AK_HOME/.env"; touch "$ei_env" 2>/dev/null || true
-    grep -vE '^SEC_EDGAR_UA=' "$ei_env" 2>/dev/null > "$ei_env.tmp" || true
-    printf 'SEC_EDGAR_UA="analyst-kit akit%s@gmail.com"\n' "$ei_id" >> "$ei_env.tmp"
-    mv "$ei_env.tmp" "$ei_env" 2>/dev/null || true
-    chmod 600 "$ei_env" 2>/dev/null || true
+  if [ -s "$AK_HOME/user-id" ]; then
+    ei_id="$(tr -dc '0-9' < "$AK_HOME/user-id" 2>/dev/null)"; [ -n "$ei_id" ] || ei_id=0
+    if ! key_present SEC_EDGAR_UA; then
+      ei_env="$AK_HOME/.env"; touch "$ei_env" 2>/dev/null || true
+      grep -vE '^SEC_EDGAR_UA=' "$ei_env" 2>/dev/null > "$ei_env.tmp" || true
+      printf 'SEC_EDGAR_UA="analyst-kit akit%s@gmail.com"\n' "$ei_id" >> "$ei_env.tmp"
+      mv "$ei_env.tmp" "$ei_env" 2>/dev/null || true
+      chmod 600 "$ei_env" 2>/dev/null || true
+    fi
+    echo "USER_ID: $ei_id"
+    return 0
   fi
-  echo "USER_ID: $ei_id"
+  ensure_device
+  if [ -s "$AK_HOME/user.json" ]; then
+    echo "IDENTITY: set"
+  else
+    echo "IDENTITY: pending"
+  fi
 }
 
 # --- dispatch --------------------------------------------------------------
@@ -254,8 +351,8 @@ case "$cmd" in
   disable)       [ -n "${1:-}" ] && { do_disable "$1"; echo "disabled $1"; } || echo "usage: analyst-kit-setup disable <skill>" >&2 ;;
   enable)        [ -n "${1:-}" ] && { do_enable "$1"; echo "enabled $1"; } || echo "usage: analyst-kit-setup enable <skill>" >&2 ;;
   reconcile)     reconcile ;;
-  finish)        finish ;;
+  finish)        finish "$@" ;;
   ensure-identity) ensure_identity ;;
-  *) echo "usage: analyst-kit-setup status | home <dir> | set-key <K> <V> | skip-key <K> | disable <skill> | enable <skill> | reconcile | ack-telemetry | finish | ensure-identity" >&2 ;;
+  *) echo "usage: analyst-kit-setup status | home <dir> | set-key <K> <V> | skip-key <K> | disable <skill> | enable <skill> | reconcile | ack-telemetry | finish [--name <n> --email <e> [--fallback]] | ensure-identity" >&2 ;;
 esac
 exit 0

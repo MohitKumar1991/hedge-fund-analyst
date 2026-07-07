@@ -121,24 +121,59 @@ new_home
 assert_file "finish: onboarded"      "$HOME/.analyst-kit/.onboarded"
 assert_file "finish: telemetry-prompted" "$HOME/.analyst-kit/.telemetry-prompted"
 
-# ── analyst-kit-setup ensure-identity (auto SEC user id + UA) ──────────────────────
-section "analyst-kit-setup ensure-identity"
+# ── identity: new installs (device probe + finish --name/--email) ──────────────────
+section "identity — new install"
 new_home
 EI="$("$BIN/analyst-kit-setup" ensure-identity)"
-assert_contains "reports a user id"             "USER_ID:" "$EI"
-assert_file     "user-id file created"          "$HOME/.analyst-kit/user-id"
-ID1="$(cat "$HOME/.analyst-kit/user-id")"
-case "$ID1" in *[!0-9]*|"") bad "user id is numeric" "got [$ID1]" ;; *) ok "user id is numeric" ;; esac
-assert_contains "UA written to .env, embeds id" "akit$ID1@gmail.com" "$(cat "$HOME/.analyst-kit/.env")"
+assert_contains "fresh install reports pending identity" "IDENTITY: pending" "$EI"
+assert_nofile   "no legacy user-id created"              "$HOME/.analyst-kit/user-id"
+assert_file     "device.json probed + written"           "$HOME/.analyst-kit/device.json"
+assert_file     "device-id write-through"                "$HOME/.analyst-kit/device-id"
+DID="$(cat "$HOME/.analyst-kit/device-id" 2>/dev/null)"
+[ -n "$DID" ] && ok "device id non-empty" || bad "device id non-empty"
+assert_contains "device.json embeds the raw id"  "\"id\": \"$DID\"" "$(cat "$HOME/.analyst-kit/device.json")"
+assert_contains "device.json records a source"   '"source": "'    "$(cat "$HOME/.analyst-kit/device.json")"
+assert_absent   "no synthetic UA on new installs" "SEC_EDGAR_UA" "$(cat "$HOME/.analyst-kit/.env" 2>/dev/null || echo '')"
+"$BIN/analyst-kit-setup" ensure-identity >/dev/null
+assert_eq "device id stable across runs" "$DID" "$(cat "$HOME/.analyst-kit/device-id")"
+
+F="$("$BIN/analyst-kit-setup" finish --name "Test User" --email "t@example.com")"
+assert_contains "finish records the identity" "IDENTITY: recorded (user)" "$F"
+assert_file     "user.json written"           "$HOME/.analyst-kit/user.json"
+UJ="$(cat "$HOME/.analyst-kit/user.json")"
+assert_contains "user.json has the email"     '"email": "t@example.com"' "$UJ"
+assert_contains "user.json marks unverified"  '"email_verified": false'  "$UJ"
 # Quoted so the spaced value survives `. .env`; source in a child so no leak here.
 SRC="$(bash -c 'set -a; . "$1"; set +a; printf "%s" "${SEC_EDGAR_UA:-}"' _ "$HOME/.analyst-kit/.env")"
-assert_eq "spaced UA sources cleanly" "analyst-kit akit$ID1@gmail.com" "$SRC"
-# Idempotent: id stable, no duplicate UA line.
+assert_eq "UA built from the real identity" "analyst-kit Test User t@example.com" "$SRC"
+assert_eq "single SEC_EDGAR_UA line"        "1" "$(grep -c '^SEC_EDGAR_UA=' "$HOME/.analyst-kit/.env")"
+assert_contains "ensure-identity now reports set" "IDENTITY: set" "$("$BIN/analyst-kit-setup" ensure-identity)"
+
+new_home
+IV="$("$BIN/analyst-kit-setup" finish --name X --email "not-an-email")"
+assert_contains "invalid email is rejected"         "INVALID_EMAIL" "$IV"
+assert_nofile   "invalid email does not onboard"    "$HOME/.analyst-kit/.onboarded"
+assert_nofile   "invalid email writes no user.json" "$HOME/.analyst-kit/user.json"
+
+new_home
+"$BIN/analyst-kit-setup" finish --email "g@h.io" --fallback >/dev/null
+assert_contains "declined path records fallback source" '"source": "fallback"' "$(cat "$HOME/.analyst-kit/user.json")"
+SRC2="$(bash -c 'set -a; . "$1"; set +a; printf "%s" "${SEC_EDGAR_UA:-}"' _ "$HOME/.analyst-kit/.env")"
+assert_eq "nameless fallback UA has no double space" "analyst-kit g@h.io" "$SRC2"
+
+# ── identity: legacy installs (a user-id file) stay untouched ──────────────────────
+section "identity — legacy install untouched"
+new_home
+printf '1782406365' > "$HOME/.analyst-kit/user-id"
+EI2="$("$BIN/analyst-kit-setup" ensure-identity)"
+assert_contains "legacy id reported"              "USER_ID: 1782406365" "$EI2"
+assert_contains "legacy generated UA kept"        "akit1782406365@gmail.com" "$(cat "$HOME/.analyst-kit/.env")"
+assert_nofile   "legacy install: no device probe" "$HOME/.analyst-kit/device.json"
 "$BIN/analyst-kit-setup" ensure-identity >/dev/null
-assert_eq "id stable across runs"     "$ID1" "$(cat "$HOME/.analyst-kit/user-id")"
-assert_eq "single SEC_EDGAR_UA line"  "1" "$(grep -c '^SEC_EDGAR_UA=' "$HOME/.analyst-kit/.env")"
+assert_eq "legacy: single SEC_EDGAR_UA line" "1" "$(grep -c '^SEC_EDGAR_UA=' "$HOME/.analyst-kit/.env")"
 # An explicit SEC_EDGAR_UA already in the environment is never overwritten into .env.
 new_home
+printf '123' > "$HOME/.analyst-kit/user-id"
 SEC_EDGAR_UA="mine me@x.com" "$BIN/analyst-kit-setup" ensure-identity >/dev/null
 assert_absent "explicit UA not mirrored to .env" "SEC_EDGAR_UA=" "$(cat "$HOME/.analyst-kit/.env" 2>/dev/null || echo '')"
 

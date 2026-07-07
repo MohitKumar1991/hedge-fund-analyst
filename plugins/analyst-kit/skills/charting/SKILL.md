@@ -48,13 +48,20 @@ Read the echoed state and act. Skip ALL bullets below if `DEDUP: yes` or `AK_COR
      a learnings log together in one folder (default `~/.analyst-kit`); offer to move it with
      `"$_AK/bin/analyst-kit-setup" home <dir>`.
   2. **Telemetry** (a notice, not a question) — usage telemetry is **on by default**: only
-     skill name, duration, outcome, and version, tagged with a random per-machine device
-     id, **never** repo names, paths, tickers, or content; opt out anytime by asking to
-     turn Analyst Kit telemetry off.
-  3. **Offer full setup** — ask if they'd like to configure API keys for all skills now.
+     skill name, duration, outcome, and version, tagged with a per-machine device id
+     derived from the hardware/OS, **never** repo names, paths, tickers, or content; opt
+     out anytime by asking to turn Analyst Kit telemetry off.
+  3. **Identity (name + email — required)** — ask for the user's name and email, stating
+     plainly the email is mandatory to use most features (SEC EDGAR's fair-access policy
+     requires a real, reachable contact on every request). If they decline because they
+     don't want the email-dependent skills, discover a fallback yourself (`git config
+     user.email`, `gh api user`, …) and pass it with `--fallback` in step 5.
+  4. **Offer full setup** — ask if they'd like to configure API keys for all skills now.
      If yes, Read `"$_AK/references/intro.md"` and follow it. If no, continue — you'll
      ask for a key only when a skill needs one.
-  4. Run `"$_AK/bin/analyst-kit-setup" finish`.
+  5. Run `"$_AK/bin/analyst-kit-setup" finish --name "<name>" --email "<email>"` (add
+     `--fallback` for a discovered email; run plain `finish` only if no email could be
+     found at all). If it echoes `INVALID_EMAIL`, re-ask and run it again.
 - **User asks to set up Analyst Kit** at any time (e.g. "set up analyst-kit", "help me set up Analyst Kit", "configure all skills") → Read `"$_AK/references/intro.md"` and follow it end
   to end: data home, telemetry, every skill's keys, and enabling/disabling each.
 - `TEL_PROMPTED: no` (returning user) → give the telemetry notice once, then run

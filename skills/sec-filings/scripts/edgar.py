@@ -39,10 +39,11 @@ import sys
 import time
 import urllib.request
 
-# SEC asks for a real contact. Honor an explicit SEC_EDGAR_UA; otherwise derive a
-# stable per-install contact from the analyst-kit user id (~/.analyst-kit/user-id,
-# generated once on first run) so installs don't all share one User-Agent — SEC's
-# fair-access policy throttles by UA. Falls back to a generic default if no id yet.
+# SEC asks for a real contact. Honor an explicit SEC_EDGAR_UA; otherwise derive
+# the contact from the identity captured at onboarding (~/.analyst-kit/user.json:
+# real name + email), else from the legacy per-install user id (user-id file, old
+# installs) so installs don't all share one User-Agent — SEC's fair-access policy
+# throttles by UA. Falls back to a generic default if no identity exists yet.
 def _ak_home():
     h = os.environ.get("AK_HOME")
     if not h:
@@ -54,8 +55,17 @@ def _ak_home():
 
 
 def _default_ua():
+    home = _ak_home()
     try:
-        uid = (_ak_home() / "user-id").read_text().strip()
+        info = json.loads((home / "user.json").read_text())
+        email = (info.get("email") or "").strip()
+        name = (info.get("name") or "").strip()
+        if email:
+            return "analyst-kit %s %s" % (name, email) if name else "analyst-kit %s" % email
+    except (OSError, ValueError):
+        pass
+    try:
+        uid = (home / "user-id").read_text().strip()
     except OSError:
         uid = ""
     return "analyst-kit akit%s@gmail.com" % uid if uid.isdigit() \
